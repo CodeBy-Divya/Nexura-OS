@@ -1,0 +1,11 @@
+# Nexura OS — public marketing + public health tools are crawlable.
+# Private/authenticated healthcare surfaces must never be indexed.
+User-agent: *
+Allow: /
+Disallow: /portal
+Disallow: /connect
+Disallow: /global/dashboard
+Disallow: /api/
+
+# Update to the production origin when it is finalized.
+Sitemap: https://nexura-os.app/sitemap.xml

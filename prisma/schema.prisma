@@ -1,0 +1,3342 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Looking for ways to speed up your queries, or scale easily with your serverless or edge functions?
+// Try Prisma Accelerate: https://pris.ly/cli/accelerate-init
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Nexura OS — signups & appointment requests
+model Lead {
+  id        String   @id @default(cuid())
+  email     String
+  name      String?
+  type      String   @default("early_access") // early_access | appointment
+  specialty String?
+  slot      String?
+  reason    String?
+  date      String? // ISO date string when type=appointment
+  createdAt DateTime @default(now())
+
+  @@index([email])
+  @@index([type])
+}
+
+/**
+ * ============================================================
+ * NEXURA PHARMACIA — AI-driven Pharmacy Management
+ * Schema designed for multi-batch, salt-based, GST-compliant
+ * retail pharmacy operations. SQLite-compatible (Postgres-ready).
+ * ============================================================
+ */
+
+// Multi-branch company (pharmacy chain owner)
+model PharmaCompany {
+  id          String         @id @default(cuid())
+  name        String
+  gstin       String? // GST Identification Number
+  email       String?
+  phone       String?
+  drugLicense String? // 20B/21B license
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+  branches    PharmaBranch[]
+  staff       PharmaStaff[]
+}
+
+model PharmaBranch {
+  id                String             @id @default(cuid())
+  companyId         String
+  name              String
+  address           String?
+  city              String?
+  state             String?
+  pincode           String?
+  gstin             String?
+  createdAt         DateTime           @default(now())
+  company           PharmaCompany      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  staff             PharmaStaff[]
+  products          ProductBatch[]
+  sales             Sale[]
+  purchases         Purchase[]
+  scheduleHEntries  ScheduleHEntry[]
+  nearExpiryReturns NearExpiryReturn[]
+  dayClosings       DayClosing[]
+
+  @@index([companyId])
+}
+
+// Staff with roles (owner / manager / pharmacist / cashier)
+model PharmaStaff {
+  id        String        @id @default(cuid())
+  companyId String
+  branchId  String?
+  name      String
+  email     String        @unique
+  phone     String?
+  role      String        @default("pharmacist") // owner | manager | pharmacist | cashier
+  pinHash   String? // quick-login PIN hash
+  active    Boolean       @default(true)
+  createdAt DateTime      @default(now())
+  company   PharmaCompany @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  branch    PharmaBranch? @relation(fields: [branchId], references: [id])
+  sales     Sale[]
+
+  @@index([companyId])
+  @@index([branchId])
+}
+
+// Customer (walk-in or registered, for GST billing)
+model Customer {
+  id        String            @id @default(cuid())
+  name      String            @default("Walk-in")
+  phone     String?
+  email     String?
+  gstin     String? // optional B2B GSTIN
+  address   String?
+  dob       String?
+  createdAt DateTime          @default(now())
+  sales     Sale[]
+  account   CustomerAccount?
+  payments  CustomerPayment[]
+
+  @@index([phone])
+  @@index([gstin])
+}
+
+// Supplier / distributor
+model Supplier {
+  id        String             @id @default(cuid())
+  name      String
+  phone     String?
+  email     String?
+  gstin     String?
+  dlNumber  String? // drug license
+  address   String?
+  createdAt DateTime           @default(now())
+  purchases Purchase[]
+  payments  SupplierPayment[]
+  returns   NearExpiryReturn[]
+
+  @@index([name])
+}
+
+// Master product (medicine) — salt composition drives generic alternatives
+model Product {
+  id              String         @id @default(cuid())
+  name            String
+  genericName     String? // Paracetamol, Azithromycin…
+  brand           String?
+  category        String         @default("general") // tablet | syrup | capsule | ointment | injection | device
+  hsn             String? // HSN code for GST
+  schedule        String? // H / H1 / Rx / OTC
+  salts           String? // comma-joined salt composition "Paracetamol 650mg"
+  packaging       String? // "10x10 tablets" / "strip of 10"
+  stripsPerBox    Int            @default(10)
+  tabletsPerStrip Int            @default(10)
+  cgstRate        Float          @default(6.0) // %
+  sgstRate        Float          @default(6.0)
+  reorderLevel    Int            @default(20) // units
+  createdAt       DateTime       @default(now())
+  batches         ProductBatch[]
+  saleItems       SaleItem[]
+  purchaseItems   PurchaseItem[]
+
+  @@index([name])
+  @@index([genericName])
+  @@index([hsn])
+}
+
+// Product batch — strict mfg/expiry, multi-batch per product
+model ProductBatch {
+  id           String       @id @default(cuid())
+  productId    String
+  branchId     String
+  batchNo      String // B2, AX1021…
+  barcode      String?
+  mfgDate      String // ISO "2024-03"
+  expDate      String // ISO "2026-03"
+  mrp          Int // paise — max retail price per strip/unit
+  purchaseRate Int          @default(0) // paise
+  stockStrips  Int          @default(0)
+  stockLoose   Int          @default(0) // loose tablets
+  createdAt    DateTime     @default(now())
+  product      Product      @relation(fields: [productId], references: [id], onDelete: Cascade)
+  branch       PharmaBranch @relation(fields: [branchId], references: [id])
+  saleItems    SaleItem[]
+
+  @@index([productId])
+  @@index([branchId])
+  @@index([batchNo])
+  @@index([barcode])
+  @@index([expDate])
+  @@unique([branchId, productId, batchNo])
+}
+
+// Sale (invoice)
+model Sale {
+  id          String       @id @default(cuid())
+  invoiceNo   String       @unique // INV-2026-0001
+  branchId    String
+  staffId     String?
+  customerId  String?
+  subtotal    Int          @default(0) // paise
+  discountPct Float        @default(0) // % (rate, not money)
+  discount    Int          @default(0) // paise
+  cgst        Int          @default(0) // paise
+  sgst        Int          @default(0) // paise
+  roundOff    Int          @default(0) // paise
+  total       Int          @default(0) // paise
+  payMode     String       @default("cash") // cash | upi | card | credit
+  status      String       @default("billed") // draft | billed | cancelled | returned
+  createdAt   DateTime     @default(now())
+  branch      PharmaBranch @relation(fields: [branchId], references: [id])
+  staff       PharmaStaff? @relation(fields: [staffId], references: [id])
+  customer    Customer?    @relation(fields: [customerId], references: [id])
+  items       SaleItem[]
+
+  @@index([branchId])
+  @@index([createdAt])
+  @@index([invoiceNo])
+  @@index([customerId])
+  @@index([staffId])
+}
+
+model SaleItem {
+  id          String       @id @default(cuid())
+  saleId      String
+  productId   String
+  batchId     String
+  qtyStrips   Int          @default(0)
+  qtyLoose    Int          @default(0)
+  mrpPerStrip Int // paise
+  discount    Int          @default(0) // paise
+  cgstRate    Float        @default(0) // % (rate, not money)
+  sgstRate    Float        @default(0) // % (rate, not money)
+  lineTotal   Int          @default(0) // paise
+  sale        Sale         @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  product     Product      @relation(fields: [productId], references: [id])
+  batch       ProductBatch @relation(fields: [batchId], references: [id])
+
+  @@index([saleId])
+  @@index([productId])
+  @@index([batchId])
+}
+
+// Purchase order from supplier
+model Purchase {
+  id                String            @id @default(cuid())
+  poNo              String            @unique
+  supplierInvoiceNo String? // supplier's own invoice number
+  branchId          String
+  supplierId        String
+  status            String            @default("draft") // draft | ordered | received | cancelled
+  total             Int               @default(0) // paise
+  paidAmount        Int               @default(0) // paise
+  createdAt         DateTime          @default(now())
+  branch            PharmaBranch      @relation(fields: [branchId], references: [id])
+  supplier          Supplier          @relation(fields: [supplierId], references: [id])
+  items             PurchaseItem[]
+  payments          SupplierPayment[]
+
+  @@index([branchId])
+  @@index([supplierId])
+}
+
+model PurchaseItem {
+  id           String   @id @default(cuid())
+  purchaseId   String
+  productId    String
+  batchNo      String
+  mfgDate      String
+  expDate      String
+  mrp          Int // paise
+  purchaseRate Int // paise
+  qtyStrips    Int
+  lineTotal    Int // paise
+  purchase     Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  product      Product  @relation(fields: [productId], references: [id])
+
+  @@index([purchaseId])
+  @@index([productId])
+}
+
+/**
+ * ============================================================
+ * NEXURA HOSPITAL OS — The most advanced hospital OS for India
+ * Built 2026 — Epic architecture + Oracle AI-first + WhatsApp + ABHA
+ * ICMR/NFHS-5 Indian clinical intelligence, frugal 4G infrastructure
+ * ============================================================
+ */
+
+model Hospital {
+  id                      String                       @id @default(cuid())
+  name                    String
+  nabhAccredited          Boolean                      @default(false)
+  gstin                   String?
+  address                 String?
+  district                String?
+  state                   String?
+  pincode                 String?
+  contact                 String?
+  subscriptionTier        String                       @default("standard") // basic | standard | premium
+  createdAt               DateTime                     @default(now())
+  doctors                 HospitalDoctor[]
+  staff                   HospitalStaff[]
+  wards                   HospitalWard[]
+  beds                    HospitalBed[]
+  patients                HospitalPatient[]
+  appointments            HospitalAppointment[]
+  admissions              HospitalAdmission[]
+  bloodBank               BloodBankUnit[]
+  otSurgeries             OTSurgery[]
+  insuranceClaims         InsuranceClaim[]
+  bills                   HospitalBill[]
+  tourismInquiries        TourismInquiry[]
+  tourismProcedures       TourismProcedure[]
+  tourismSetting          TourismSetting?
+  tourismCoordinators     TourismCoordinator[]
+  tourismTestimonials     TourismTestimonial[]
+  nxStaffUsers            NxStaffUser[]
+  nxTasks                 NxTask[]
+  nxIncidents             NxIncident[]
+  nxAuditEvents           NxAuditEvent[]
+  nxOrderEvents           NxOrderEvent[]
+  nxEquipment             NxEquipment[]
+  nxSupplies              NxSupplyItem[]
+  nxMessages              NxMessage[]
+  nxRules                 NxAutomationRule[]
+  nxRuns                  NxWorkflowRun[]
+  nxAIInteractions        NxAIInteraction[]
+  organization            NxOrganization?              @relation(fields: [organizationId], references: [id])
+  organizationId          String?
+  nxDepartments           NxDepartment[]
+  nxNotifications         NxNotification[]
+  nxConsents              NxConsent[]
+  nxChannels              NxChannel[]
+  nxMedAdmins             NxMedicationAdministration[]
+  nxImagingReports        NxImagingReport[]
+  nxCharges               NxCharge[]
+  nxPayments              NxPayment[]
+  nxVendors               NxVendor[]
+  nxPurchaseOrders        NxPurchaseOrder[]
+  nxStockTxns             NxStockTxn[]
+  nxShiftAssignments      NxShiftAssignment[]
+  nxWaitlist              NxAppointmentWaitlist[]
+  nxAppointmentEvents     NxAppointmentEvent[]
+  nxWebhooks              NxWebhookDelivery[]
+  nxWebhookEndpoints      NxWebhookEndpoint[]
+  nxIntegrationEvents     NxIntegrationEvent[]
+  nxFiles                 NxFileObject[]
+  nxBreakGlassEvents      NxBreakGlassEvent[]
+  // v5 — Chief Future Architect layer (tenancy + governance + flagship)
+  tenant                  NxTenant?                    @relation(fields: [tenantId], references: [id])
+  tenantId                String?
+  nxAbacPolicies          NxAbacPolicy[]
+  nxEscalationPolicies    NxEscalationPolicy[]
+  nxEscalationEvents      NxEscalationEvent[]
+  nxPathwayDefs           NxPathwayDef[]
+  nxPathwayRuns           NxPathwayRun[]
+  nxTimestampBlocks       NxTimestampBlock[]
+  nxVerifiableCredentials NxVerifiableCredential[]
+  nxInsuranceContracts    NxInsuranceContract[]
+  nxWearableDevices       NxWearableDevice[]
+  nxGenomicProfiles       NxGenomicProfile[]
+  nxTeleConsults          NxTeleConsult[]
+  nxAiThresholds          NxAiThreshold[]
+  nxAiFeedbacks           NxAiFeedback[]
+  nxDicomStudies          NxDicomStudy[]
+  nxDocVersions           NxDocVersion[]
+  nxJourneyAnnotations    NxJourneyAnnotation[]
+  nxEventLogs             NxEventLog[]
+
+  @@index([tenantId])
+}
+
+model HospitalPatient {
+  id                        String                       @id @default(cuid())
+  hospitalId                String
+  uhid                      String                       @unique // auto-generated UHID
+  abhaId                    String? // ABHA Ayushman Bharat ID
+  abhaProfile               String? // JSON cached profile
+  fullName                  String
+  dob                       String? // ISO date
+  age                       Int?
+  gender                    String                       @default("male")
+  bloodGroup                String?
+  address                   String?
+  district                  String?
+  state                     String?
+  emergencyContactName      String?
+  emergencyContactPhone     String?
+  primaryLanguage           String                       @default("English") // Hindi|English|Tamil|Telugu|Marathi|Bengali|Kannada|Gujarati|Punjabi|Odia
+  insuranceProvider         String?
+  insurancePolicyNo         String?
+  pmjayBeneficiary          Boolean                      @default(false)
+  phone                     String?
+  allergy                   String?
+  chronicConditions         String?
+  createdAt                 DateTime                     @default(now())
+  hospital                  Hospital                     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  appointments              HospitalAppointment[]
+  admissions                HospitalAdmission[]
+  vitals                    HospitalVital[]
+  clinicalNotes             ClinicalNote[]
+  orders                    HospitalOrder[]
+  prescriptions             HospitalPrescription[]
+  bills                     HospitalBill[]
+  insuranceClaims           InsuranceClaim[]
+  otSurgeries               OTSurgery[]
+  consents                  NxConsent[]
+  medicationAdministrations NxMedicationAdministration[]
+  files                     NxFileObject[]
+
+  @@index([hospitalId])
+  @@index([uhid])
+  @@index([abhaId])
+  @@index([phone])
+}
+
+model HospitalDoctor {
+  id              String                 @id @default(cuid())
+  hospitalId      String
+  name            String
+  regNo           String? // MCI/SMC registration
+  specialty       String // Cardiologist|General Physician|Pediatrician|etc
+  department      String?
+  consultationFee Int                    @default(50000) // paise (₹500)
+  availableDays   String? // JSON array
+  availableHours  String? // JSON {start,end}
+  languagesSpoken String? // JSON array
+  photoUrl        String?
+  active          Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  hospital        Hospital               @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  appointments    HospitalAppointment[]
+  admissions      HospitalAdmission[]
+  clinicalNotes   ClinicalNote[]
+  orders          HospitalOrder[]
+  prescriptions   HospitalPrescription[]
+  otSurgeries     OTSurgery[]            @relation("OTSurgeon")
+  otAnesthetist   OTSurgery[]            @relation("OTAnesthetist")
+
+  @@index([hospitalId])
+  @@index([specialty])
+}
+
+model HospitalStaff {
+  id             String          @id @default(cuid())
+  hospitalId     String
+  name           String
+  role           String          @default("nurse") // admin|doctor|nurse|receptionist|lab|pharmacist|ot_tech|housekeeping
+  department     String?
+  shift          String? // morning|evening|night
+  employeeId     String?
+  phone          String?
+  joinDate       DateTime?
+  active         Boolean         @default(true)
+  createdAt      DateTime        @default(now())
+  hospital       Hospital        @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  vitalsRecorded HospitalVital[]
+  labResults     LabResult[]
+
+  @@index([hospitalId])
+  @@index([role])
+}
+
+model HospitalWard {
+  id          String              @id @default(cuid())
+  hospitalId  String
+  name        String // ward name
+  wardType    String              @default("general") // general|icu|hdu|maternity|pediatric|surgical|orthopedic|cardiac
+  totalBeds   Int                 @default(10)
+  floorNumber Int?
+  createdAt   DateTime            @default(now())
+  hospital    Hospital            @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  beds        HospitalBed[]
+  admissions  HospitalAdmission[]
+
+  @@index([hospitalId])
+}
+
+model HospitalBed {
+  id                 String              @id @default(cuid())
+  hospitalId         String
+  wardId             String
+  bedNumber          String
+  bedType            String              @default("general") // general|icu|hdu|isolation|maternity|pediatric|surgical
+  status             String              @default("available") // available|reserved|occupied|cleaning_required|cleaning_in_progress|out_of_service|isolation|maintenance|cleaning (legacy)
+  currentPatientUhid String?
+  lastCleanedAt      DateTime?
+  reservedForName    String?
+  isolationReason    String?
+  maintenanceNote    String?
+  createdAt          DateTime            @default(now())
+  hospital           Hospital            @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  ward               HospitalWard        @relation(fields: [wardId], references: [id], onDelete: Cascade)
+  admissions         HospitalAdmission[]
+
+  @@unique([wardId, bedNumber])
+  @@index([hospitalId])
+  @@index([status])
+}
+
+// Double-booking guard: a PARTIAL unique index on ("doctorId","date") WHERE
+// status NOT IN ('cancelled','no_show') enforces one active appointment per
+// doctor + exact timeslot timestamp. Prisma cannot express partial indexes,
+// so it is created as raw SQL in migration integrity_indexes_batch_identity
+// (with a deterministic dedupe that cancels newer duplicates first).
+model HospitalAppointment {
+  id                String                 @id @default(cuid())
+  hospitalId        String
+  patientUhid       String
+  patientId         String
+  doctorId          String
+  date              DateTime
+  timeSlot          String
+  tokenNumber       Int                    @default(1)
+  appointmentType   String                 @default("opd") // opd|teleconsult|followup
+  status            String                 @default("scheduled") // scheduled|waiting|in_consultation|completed|no_show|cancelled
+  room              String?
+  timezone          String                 @default("Asia/Kolkata")
+  notes             String?
+  checkedInAt       DateTime?
+  reminderSentAt    DateTime?
+  rescheduledFromId String?
+  chiefComplaint    String?
+  createdAt         DateTime               @default(now())
+  hospital          Hospital               @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient           HospitalPatient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor            HospitalDoctor         @relation(fields: [doctorId], references: [id])
+  vitals            HospitalVital[]
+  clinicalNotes     ClinicalNote[]
+  orders            HospitalOrder[]
+  prescriptions     HospitalPrescription[]
+  bills             HospitalBill[]
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([doctorId])
+  @@index([date])
+  @@index([status])
+}
+
+model HospitalAdmission {
+  id                    String                 @id @default(cuid())
+  hospitalId            String
+  patientUhid           String
+  patientId             String
+  admittingDoctorId     String?
+  wardId                String?
+  bedId                 String?
+  admissionDate         DateTime               @default(now())
+  admissionDiagnosis    String?
+  admissionType         String                 @default("emergency") // emergency|elective
+  expectedDischargeDate DateTime?
+  actualDischargeDate   DateTime?
+  dischargeStatus       String? // active|discharged|transferred|expired
+  dischargeSummary      String?
+  createdAt             DateTime               @default(now())
+  hospital              Hospital               @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient               HospitalPatient        @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  admittingDoctor       HospitalDoctor?        @relation(fields: [admittingDoctorId], references: [id])
+  ward                  HospitalWard?          @relation(fields: [wardId], references: [id])
+  bed                   HospitalBed?           @relation(fields: [bedId], references: [id])
+  vitals                HospitalVital[]
+  clinicalNotes         ClinicalNote[]
+  orders                HospitalOrder[]
+  prescriptions         HospitalPrescription[]
+  bills                 HospitalBill[]
+  insuranceClaims       InsuranceClaim[]
+  otSurgeries           OTSurgery[]
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([bedId])
+  @@index([admittingDoctorId])
+  @@index([wardId])
+  @@index([dischargeStatus])
+}
+
+model HospitalVital {
+  id                String               @id @default(cuid())
+  hospitalId        String
+  patientUhid       String
+  patientId         String
+  admissionId       String?
+  appointmentId     String?
+  recordedByStaffId String?
+  recordedAt        DateTime             @default(now())
+  bpSystolic        Int?
+  bpDiastolic       Int?
+  pulseRate         Int?
+  temperatureC      Float?
+  respiratoryRate   Int?
+  spo2              Int?
+  bloodGlucose      Int?
+  weightKg          Float?
+  heightCm          Float?
+  glasgowComaScale  Int? // GCS for ICU
+  news2Score        Int? // auto-calculated
+  createdAt         DateTime             @default(now())
+  patient           HospitalPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  admission         HospitalAdmission?   @relation(fields: [admissionId], references: [id])
+  appointment       HospitalAppointment? @relation(fields: [appointmentId], references: [id])
+  recordedBy        HospitalStaff?       @relation(fields: [recordedByStaffId], references: [id])
+
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([appointmentId])
+  @@index([recordedByStaffId])
+  @@index([recordedAt])
+  @@index([hospitalId])
+}
+
+model ClinicalNote {
+  id                  String               @id @default(cuid())
+  hospitalId          String
+  patientUhid         String
+  patientId           String
+  doctorId            String?
+  appointmentId       String?
+  admissionId         String?
+  noteType            String               @default("soap") // soap|progress|discharge|procedure|referral
+  status              String               @default("draft") // draft|signed|amended
+  signedAt            DateTime?
+  signedByName        String?
+  signedByRole        String?
+  locked              Boolean              @default(false) // signed notes are immutable
+  addendumToNoteId    String? // addendum chain
+  currentVersion      Int                  @default(1)
+  restricted          Boolean              @default(false) // behavioral health / sensitive
+  subjective          String?
+  objective           String?
+  assessment          String?
+  plan                String?
+  fullText            String?
+  dictationTranscript String?
+  aiStructured        Boolean              @default(false)
+  createdAt           DateTime             @default(now())
+  updatedAt           DateTime             @updatedAt
+  patient             HospitalPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor              HospitalDoctor?      @relation(fields: [doctorId], references: [id])
+  appointment         HospitalAppointment? @relation(fields: [appointmentId], references: [id])
+  admission           HospitalAdmission?   @relation(fields: [admissionId], references: [id])
+  versions            NxNoteVersion[]
+
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([appointmentId])
+  @@index([doctorId])
+  @@index([noteType])
+  @@index([status])
+  @@index([hospitalId])
+}
+
+model HospitalOrder {
+  id               String               @id @default(cuid())
+  hospitalId       String
+  patientUhid      String
+  patientId        String
+  orderingDoctorId String?
+  admissionId      String?
+  appointmentId    String?
+  orderType        String               @default("lab") // lab|medication|imaging|procedure|referral|diet
+  orderDetails     String // JSON
+  priority         String               @default("routine") // routine|urgent|stat
+  status           String               @default("ordered") // ordered|acknowledged|in_progress|completed|cancelled
+  createdAt        DateTime             @default(now())
+  patient          HospitalPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor           HospitalDoctor?      @relation(fields: [orderingDoctorId], references: [id])
+  admission        HospitalAdmission?   @relation(fields: [admissionId], references: [id])
+  appointment      HospitalAppointment? @relation(fields: [appointmentId], references: [id])
+  labResults       LabResult[]
+  imagingReports   NxImagingReport[]
+  nxOrderEvents    NxOrderEvent[]
+
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([appointmentId])
+  @@index([orderingDoctorId])
+  @@index([orderType])
+  @@index([status])
+  @@index([priority])
+  @@index([hospitalId])
+}
+
+model LabResult {
+  id                 String         @id @default(cuid())
+  orderId            String
+  testName           String
+  resultValue        String?
+  unit               String?
+  refRangeMin        Float?
+  refRangeMax        Float?
+  abnormalFlag       String         @default("normal") // normal|low|high|critical
+  resultText         String? // for qualitative tests
+  reportedByStaffId  String?
+  reportedAt         DateTime?
+  verificationStatus String         @default("pending") // pending|verified|rejected
+  verifiedByStaffId  String?
+  verifiedAt         DateTime?
+  criticalNotifiedAt DateTime?
+  collectedAt        DateTime?
+  createdAt          DateTime       @default(now())
+  order              HospitalOrder  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  reportedBy         HospitalStaff? @relation(fields: [reportedByStaffId], references: [id])
+
+  @@index([orderId])
+  @@index([abnormalFlag])
+  @@index([verificationStatus])
+  @@index([reportedByStaffId])
+}
+
+model HospitalMedicine {
+  id               String   @id @default(cuid())
+  medicineName     String
+  genericName      String?
+  saltComposition  String?
+  company          String?
+  packType         String?
+  gstRate          Float    @default(12)
+  nppaControlled   Boolean  @default(false)
+  nppaCeilingPrice Int? // paise
+  cdscoBanned      Boolean  @default(false)
+  schedule         String   @default("otc") // otc|schedule_h|schedule_h1|ndps
+  stockQuantity    Int      @default(0)
+  createdAt        DateTime @default(now())
+
+  @@index([medicineName])
+  @@index([genericName])
+}
+
+model HospitalPrescription {
+  id                  String               @id @default(cuid())
+  hospitalId          String
+  patientUhid         String
+  patientId           String
+  prescribingDoctorId String?
+  consultationId      String? // appointment or admission
+  items               String // JSON array of {medicineId, dose, frequency, duration, route, instructions}
+  createdAt           DateTime             @default(now())
+  patient             HospitalPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor              HospitalDoctor?      @relation(fields: [prescribingDoctorId], references: [id])
+  // Two FKs share one column (consultationId may point at an appointment OR an
+  // admission). SQLite tolerated the auto-generated constraint-name collision;
+  // Postgres requires unique names — explicit `map` keeps both installable.
+  appointment         HospitalAppointment? @relation(fields: [consultationId], references: [id], map: "HospitalPrescription_consultation_appointment_fkey")
+  admission           HospitalAdmission?   @relation(fields: [consultationId], references: [id], map: "HospitalPrescription_consultation_admission_fkey")
+
+  @@index([patientId])
+  @@index([consultationId])
+  @@index([prescribingDoctorId])
+  @@index([hospitalId])
+}
+
+model HospitalBill {
+  id               String               @id @default(cuid())
+  hospitalId       String
+  patientUhid      String
+  patientId        String
+  admissionId      String?
+  appointmentId    String?
+  billDate         DateTime             @default(now())
+  itemizedCharges  String // JSON array
+  subtotal         Int                  @default(0) // paise
+  discount         Int                  @default(0) // paise
+  cgst             Int                  @default(0) // paise
+  sgst             Int                  @default(0) // paise
+  totalPayable     Int                  @default(0) // paise
+  paymentMode      String               @default("cash") // cash|upi|card|insurance|credit
+  insuranceClaimId String?
+  paymentStatus    String               @default("unpaid") // unpaid|paid|partial|refunded
+  createdAt        DateTime             @default(now())
+  hospital         Hospital             @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient          HospitalPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  appointment      HospitalAppointment? @relation(fields: [appointmentId], references: [id])
+  admission        HospitalAdmission?   @relation(fields: [admissionId], references: [id])
+
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([appointmentId])
+  @@index([billDate])
+  @@index([paymentStatus])
+  @@index([hospitalId])
+}
+
+model InsuranceClaim {
+  id                String             @id @default(cuid())
+  hospitalId        String
+  patientUhid       String
+  patientId         String
+  admissionId       String?
+  tpaCompany        String // Star Health|Medi-Assist|Vidal|MD India|Heritage|United India|New India|Oriental|Bajaj Allianz|ICICI Lombard|Niva Bupa
+  policyNumber      String?
+  icd10Primary      String?
+  icd10Secondary    String? // JSON array
+  plannedProcedures String? // JSON array
+  estimatedCost     Int                @default(0) // paise
+  preAuthStatus     String             @default("draft") // draft|submitted|query_raised|approved|partially_approved|rejected
+  approvedAmount    Int                @default(0) // paise
+  patientCopay      Int                @default(0) // paise
+  cashless          Boolean            @default(false)
+  submittedAt       DateTime?
+  approvedAt        DateTime?
+  createdAt         DateTime           @default(now())
+  hospital          Hospital           @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient           HospitalPatient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  admission         HospitalAdmission? @relation(fields: [admissionId], references: [id])
+
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([tpaCompany])
+  @@index([preAuthStatus])
+  @@index([hospitalId])
+}
+
+model BloodBankUnit {
+  id             String    @id @default(cuid())
+  hospitalId     String
+  bloodGroup     String // A+|A-|B+|B-|AB+|AB-|O+|O-
+  component      String    @default("whole_blood") // whole_blood|packed_rbc|platelets|ffp|cryoprecipitate
+  unitsAvailable Int       @default(0)
+  expiryDate     DateTime?
+  updatedAt      DateTime  @default(now())
+  hospital       Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+  @@index([bloodGroup])
+}
+
+model OTSurgery {
+  id                   String             @id @default(cuid())
+  hospitalId           String
+  otRoomNumber         String
+  patientUhid          String
+  patientId            String
+  procedureName        String
+  surgeonId            String?
+  anesthetistId        String?
+  scrubNurseId         String?
+  admissionId          String?
+  plannedStartTime     DateTime?
+  estimatedDurationMin Int?
+  actualStartTime      DateTime?
+  actualEndTime        DateTime?
+  status               String             @default("planned") // planned|in_progress|completed|cancelled|postponed
+  preOpChecklist       String? // JSON {consent,fasted,site_marked,allergies_verified,blood_arranged,equipment_checked}
+  createdAt            DateTime           @default(now())
+  hospital             Hospital           @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient              HospitalPatient    @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  surgeon              HospitalDoctor?    @relation("OTSurgeon", fields: [surgeonId], references: [id])
+  anesthetist          HospitalDoctor?    @relation("OTAnesthetist", fields: [anesthetistId], references: [id])
+  admission            HospitalAdmission? @relation(fields: [admissionId], references: [id])
+
+  @@index([hospitalId])
+  @@index([patientId])
+  @@index([admissionId])
+  @@index([surgeonId])
+  @@index([anesthetistId])
+  @@index([status])
+  @@index([plannedStartTime])
+}
+
+/**
+ * ============================================================
+ * NEXURA CLINIC OS — simple clinic operating system
+ * Designed for solo practitioners & small clinics.
+ * ============================================================
+ */
+
+model Clinic {
+  id             String              @id @default(cuid())
+  name           String
+  ownerName      String?
+  phone          String?
+  email          String?
+  address        String?
+  city           String?
+  regNo          String?
+  bookingSlug    String?             @unique // public booking URL slug
+  createdAt      DateTime            @default(now())
+  doctors        ClinicDoctor[]
+  patients       ClinicPatient[]
+  appointments   ClinicAppointment[]
+  visits         ClinicVisit[]
+  invoices       ClinicInvoice[]
+  onlineBookings OnlineBooking[]
+  telemedicineConsults TelemedicineConsult[]
+}
+
+model ClinicDoctor {
+  id             String              @id @default(cuid())
+  clinicId       String
+  name           String
+  specialization String?
+  qualification  String?
+  phone          String?
+  feeConsult     Int                 @default(50000) // paise (₹500)
+  shiftStart     String? // "09:00"
+  shiftEnd       String? // "17:00"
+  active         Boolean             @default(true)
+  createdAt      DateTime            @default(now())
+  clinic         Clinic              @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  appointments   ClinicAppointment[]
+  visits         ClinicVisit[]
+  onlineBookings OnlineBooking[]
+
+  @@index([clinicId])
+}
+
+model ClinicPatient {
+  id             String              @id @default(cuid())
+  clinicId       String
+  mrn            String              @unique
+  abhaId         String? // ABDM Ayushman Bharat Health Account ID
+  abhaProfile    String? // JSON cached profile from ABDM registry
+  name           String
+  gender         String              @default("male")
+  age            Int?
+  dob            String?
+  phone          String?
+  address        String?
+  bloodGroup     String?
+  allergy        String?
+  chronicDx      String?
+  createdAt      DateTime            @default(now())
+  clinic         Clinic              @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  appointments   ClinicAppointment[]
+  visits         ClinicVisit[]
+  invoices       ClinicInvoice[]
+  onlineBookings OnlineBooking[]
+  followUps      FollowUp[]
+
+  @@index([clinicId])
+  @@index([phone])
+  @@index([name])
+  @@index([abhaId])
+}
+
+model ClinicAppointment {
+  id        String        @id @default(cuid())
+  clinicId  String
+  patientId String
+  doctorId  String
+  slot      DateTime
+  tokenNo   Int
+  reason    String?
+  status    String        @default("booked") // booked | arrived | done | cancelled | no_show
+  source    String        @default("walkin") // walkin | online | phone
+  createdAt DateTime      @default(now())
+  clinic    Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  patient   ClinicPatient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor    ClinicDoctor  @relation(fields: [doctorId], references: [id])
+  visit     ClinicVisit?
+
+  @@index([clinicId])
+  @@index([doctorId])
+  @@index([slot])
+  @@index([status])
+}
+
+// Clinic telemedicine consults (NMC Telemedicine Guidelines 2020 compliant) —
+// consumed by /api/clinic/telemedicine. Scalar patient reference: the client
+// may carry a ClinicPatient id or a walk-in identifier.
+model TelemedicineConsult {
+  id              String    @id @default(cuid())
+  clinicId        String
+  patientId       String?
+  patientType     String    @default("clinic") // clinic | walkin
+  doctorName      String
+  doctorRegNo     String // NMC/MCI registration — mandatory for teleconsults
+  consultMode     String    @default("video") // video | audio | chat
+  chiefComplaint  String?
+  diagnosis       String?
+  prescription    String?
+  followUpDate    DateTime?
+  patientConsent  Boolean   @default(true)
+  consentText     String?
+  status          String    @default("scheduled") // scheduled | in_progress | completed | cancelled
+  startedAt       DateTime?
+  endedAt         DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  clinic          Clinic    @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+
+  @@index([clinicId, status])
+  @@index([clinicId, startedAt])
+}
+
+model ClinicVisit {
+  id             String             @id @default(cuid())
+  clinicId       String
+  patientId      String
+  doctorId       String?
+  appointmentId  String?            @unique
+  chiefComplaint String?
+  vitalsBP       String?
+  vitalsPulse    Int?
+  vitalsTemp     Float?
+  vitalsSpo2     Int?
+  vitalsRBS      Int? // random blood sugar (nurse-recorded)
+  weight         Float? // kg
+  diagnosis      String?
+  advice         String?
+  followUp       String?
+  status         String             @default("open") // open | closed
+  createdAt      DateTime           @default(now())
+  clinic         Clinic             @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  patient        ClinicPatient      @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  doctor         ClinicDoctor?      @relation(fields: [doctorId], references: [id])
+  appointment    ClinicAppointment? @relation(fields: [appointmentId], references: [id])
+  meds           ClinicRx[]
+  invoices       ClinicInvoice[]
+
+  @@index([clinicId])
+  @@index([patientId])
+  @@index([createdAt])
+}
+
+model ClinicRx {
+  id       String      @id @default(cuid())
+  visitId  String
+  medicine String
+  dosage   String? // 1-0-1, BD
+  duration String? // 5 days
+  notes    String?
+  visit    ClinicVisit @relation(fields: [visitId], references: [id], onDelete: Cascade)
+
+  @@index([visitId])
+}
+
+model ClinicInvoice {
+  id          String        @id @default(cuid())
+  clinicId    String
+  patientId   String
+  visitId     String?
+  invoiceNo   String        @unique
+  description String
+  amount      Int // paise
+  discount    Int           @default(0) // paise
+  total       Int // paise
+  payMode     String        @default("cash")
+  status      String        @default("unpaid") // unpaid | paid
+  createdAt   DateTime      @default(now())
+  clinic      Clinic        @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  patient     ClinicPatient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+  visit       ClinicVisit?  @relation(fields: [visitId], references: [id])
+
+  @@index([clinicId])
+  @@index([patientId])
+  @@index([status])
+}
+
+/**
+ * ============================================================
+ * Gofrugal-style compliance extensions (Round 10)
+ * ============================================================
+ */
+
+// Supplier payment (against purchase dues)
+model SupplierPayment {
+  id         String    @id @default(cuid())
+  supplierId String
+  purchaseId String?
+  amount     Int // paise
+  payMode    String    @default("cash") // cash | upi | bank | cheque
+  refNo      String? // cheque / utr
+  notes      String?
+  createdAt  DateTime  @default(now())
+  supplier   Supplier  @relation(fields: [supplierId], references: [id], onDelete: Cascade)
+  purchase   Purchase? @relation(fields: [purchaseId], references: [id])
+
+  @@index([supplierId])
+  @@index([createdAt])
+}
+
+// Customer credit account + payments
+model CustomerAccount {
+  id          String   @id @default(cuid())
+  customerId  String   @unique
+  creditLimit Int      @default(0) // paise
+  createdAt   DateTime @default(now())
+  customer    Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+}
+
+model CustomerPayment {
+  id         String   @id @default(cuid())
+  customerId String
+  saleId     String?
+  amount     Int // paise
+  payMode    String   @default("cash")
+  refNo      String?
+  notes      String?
+  createdAt  DateTime @default(now())
+  customer   Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([createdAt])
+}
+
+// Schedule H / H1 register entry (drug inspector audit)
+model ScheduleHEntry {
+  id                String       @id @default(cuid())
+  branchId          String
+  serialNo          Int // running serial for the register
+  saleId            String?
+  saleItemId        String?
+  saleDate          DateTime
+  // patient
+  patientName       String
+  patientAddress    String?
+  patientPhone      String?
+  // doctor
+  doctorName        String
+  doctorRegNo       String
+  prescriptionDate  String
+  prescriptionImage String? // url/dataURL
+  // medicine
+  medicineName      String
+  batchNo           String?
+  qtyStrips         Int          @default(0)
+  qtyLoose          Int          @default(0)
+  schedule          String // H | H1
+  createdAt         DateTime     @default(now())
+  branch            PharmaBranch @relation(fields: [branchId], references: [id])
+
+  @@index([branchId])
+  @@index([saleDate])
+  @@index([serialNo])
+}
+
+// Near-expiry return (to supplier) + credit note
+model NearExpiryReturn {
+  id         String                 @id @default(cuid())
+  branchId   String
+  returnNo   String                 @unique // RET-2026-0001
+  supplierId String
+  supplier   Supplier               @relation(fields: [supplierId], references: [id])
+  reason     String                 @default("Near expiry")
+  status     String                 @default("initiated") // initiated | dispatched | credited
+  cgst       Int                    @default(0) // paise
+  sgst       Int                    @default(0) // paise
+  total      Int                    @default(0) // paise
+  createdAt  DateTime               @default(now())
+  branch     PharmaBranch           @relation(fields: [branchId], references: [id])
+  items      NearExpiryReturnItem[]
+
+  @@index([branchId])
+  @@index([supplierId])
+}
+
+model NearExpiryReturnItem {
+  id           String           @id @default(cuid())
+  returnId     String
+  productId    String
+  batchId      String
+  batchNo      String
+  medicineName String
+  expDate      String
+  qtyStrips    Int
+  mrp          Int // paise
+  cgstRate     Float            @default(0) // % (rate, not money)
+  sgstRate     Float            @default(0) // % (rate, not money)
+  lineTotal    Int              @default(0) // paise
+  return_      NearExpiryReturn @relation(fields: [returnId], references: [id], onDelete: Cascade)
+
+  @@index([returnId])
+}
+
+// Day closing summary (Z-report)
+model DayClosing {
+  id             String       @id @default(cuid())
+  branchId       String
+  closingDate    String // YYYY-MM-DD
+  cashSales      Int          @default(0) // paise
+  upiSales       Int          @default(0) // paise
+  cardSales      Int          @default(0) // paise
+  creditSales    Int          @default(0) // paise
+  totalSales     Int          @default(0) // paise
+  cgstCollected  Int          @default(0) // paise
+  sgstCollected  Int          @default(0) // paise
+  totalGst       Int          @default(0) // paise
+  totalPurchases Int          @default(0) // paise
+  totalDiscount  Int          @default(0) // paise
+  netProfit      Int          @default(0) // paise
+  invoiceCount   Int          @default(0)
+  closedBy       String?
+  closedAt       DateTime     @default(now())
+  branch         PharmaBranch @relation(fields: [branchId], references: [id])
+
+  @@unique([branchId, closingDate])
+  @@index([branchId])
+}
+
+/**
+ * ============================================================
+ * HealthPlix-style clinic extensions (Round 12)
+ * Drug DB, online booking, follow-up automation
+ * ============================================================
+ */
+
+// Indian drug database (for HealthPlix-style Rx autocomplete)
+model IndianDrug {
+  id        String   @id @default(cuid())
+  brandName String // Crocin, Dolo, Augmentin
+  saltName  String // Paracetamol, Amoxicillin
+  strength  String? // 500mg, 650mg, 625mg
+  form      String   @default("tablet") // tablet | syrup | capsule | injection | cream
+  schedule  String? // H | H1 | OTC | Rx
+  category  String? // analgesic | antibiotic | antacid | antidiabetic…
+  company   String? // GSK, Cipla, Sun Pharma
+  createdAt DateTime @default(now())
+
+  @@index([brandName])
+  @@index([saltName])
+  @@index([category])
+}
+
+// Public online booking (from sharable URL)
+model OnlineBooking {
+  id                     String         @id @default(cuid())
+  clinicId               String
+  doctorId               String?
+  patientName            String
+  phone                  String
+  slot                   DateTime
+  status                 String         @default("booked") // booked | converted | cancelled
+  convertedPatientId     String?
+  convertedAppointmentId String?
+  createdAt              DateTime       @default(now())
+  clinic                 Clinic         @relation(fields: [clinicId], references: [id], onDelete: Cascade)
+  doctor                 ClinicDoctor?  @relation(fields: [doctorId], references: [id])
+  patient                ClinicPatient? @relation(fields: [convertedPatientId], references: [id])
+
+  @@index([clinicId])
+  @@index([slot])
+  @@index([status])
+}
+
+// Follow-up automation
+model FollowUp {
+  id             String        @id @default(cuid())
+  clinicId       String
+  patientId      String
+  visitId        String?
+  doctorId       String?
+  followUpDate   DateTime
+  reminderSent   Boolean       @default(false)
+  rescheduleSent Boolean       @default(false)
+  status         String        @default("pending") // pending | reminded | done | missed | rescheduled
+  createdAt      DateTime      @default(now())
+  patient        ClinicPatient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([followUpDate])
+  @@index([status])
+}
+
+/**
+ * ============================================================
+ * NEXURA CONNECT — unified doctor-patient communication layer
+ * Chat / Voice / Video modes with WhatsApp follow-up trigger.
+ * Auto-creates connections from:
+ * - Clinic consult save (source="clinic")
+ * - Hospital IPD admission (source="hospital")
+ * - KYH symptom triage (source="know_your_health")
+ * ============================================================
+ */
+
+model ConnectConnection {
+  id              String           @id @default(cuid())
+  doctorId        String
+  doctorName      String
+  doctorSpecialty String?
+  doctorPhone     String?
+  patientId       String
+  patientName     String
+  patientPhone    String?
+  patientAge      Int?
+  patientGender   String?
+  source          String           @default("clinic")
+  sourceRefId     String?
+  lastConsultDate DateTime?
+  whatsappSent    Boolean          @default(false)
+  whatsappSentAt  DateTime?
+  active          Boolean          @default(true)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  messages        ConnectMessage[]
+  calls           ConnectCall[]
+  queueEntries    ConnectQueue[]
+
+  @@index([doctorId])
+  @@index([patientId])
+  @@index([source])
+  @@index([active])
+}
+
+model ConnectMessage {
+  id             String            @id @default(cuid())
+  connectionId   String
+  fromRole       String            @default("patient")
+  fromName       String?
+  text           String
+  attachmentType String?
+  attachmentUrl  String?
+  read           Boolean           @default(false)
+  readAt         DateTime?
+  createdAt      DateTime          @default(now())
+  connection     ConnectConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+  @@index([createdAt])
+  @@index([read])
+}
+
+model ConnectCall {
+  id                 String            @id @default(cuid())
+  connectionId       String
+  type               String            @default("video")
+  status             String            @default("initiated")
+  initiatedBy        String            @default("patient")
+  startedAt          DateTime          @default(now())
+  answeredAt         DateTime?
+  endedAt            DateTime?
+  durationSec        Int?
+  prescriptionJson   String?
+  prescriptionSynced Boolean           @default(false)
+  pharmacySyncId     String?
+  callSummary        String?
+  createdAt          DateTime          @default(now())
+  connection         ConnectConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([connectionId])
+  @@index([status])
+}
+
+model ConnectQueue {
+  id                 String            @id @default(cuid())
+  connectionId       String
+  requestedMode      String            @default("chat")
+  reason             String?
+  status             String            @default("waiting")
+  joinedAt           DateTime          @default(now())
+  pickedUpAt         DateTime?
+  pickedUpByDoctorId String?
+  connection         ConnectConnection @relation(fields: [connectionId], references: [id], onDelete: Cascade)
+
+  @@index([status])
+  @@index([requestedMode])
+}
+
+/**
+ * ============================================================
+ * MEDICAL TOURISM — International Patient System
+ * ============================================================
+ */
+
+model TourismInquiry {
+  id                    String    @id @default(cuid())
+  hospitalId            String
+  patientName           String
+  patientEmail          String?
+  patientPhone          String?
+  patientCountry        String    @default("Unknown")
+  countryCode           String?
+  procedureInterest     String?
+  conditionDesc         String?
+  status                String    @default("new")
+  assignedCoordinatorId String?
+  coordinatorName       String?
+  // Money is integer cents (USD) / paise (INR) — same discipline as the
+  // paise migration. Wire format (API responses) stays major units.
+  estimatedCostUSDCents Int?
+  estimatedCostINRPaise Int?
+  appointmentDate       DateTime?
+  visaStatus            String?
+  arrivalDate           DateTime?
+  admissionId           String?
+  dischargeDate         DateTime?
+  outcome               String?
+  totalBilledUSDCents   Int?
+  messages              String?
+  recordsUrl            String?
+  estimateUrl           String?
+  sourceUrl             String?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
+  hospital              Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+  @@index([status])
+  @@index([patientCountry])
+}
+
+model TourismProcedure {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  name        String
+  category    String   @default("general")
+  priceUSDCents Int    // integer USD cents — wire converts to major units
+  description String?
+  avgStayDays Int      @default(7)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+  @@index([category])
+}
+
+model TourismSetting {
+  id                 String   @id @default(cuid())
+  hospitalId         String   @unique
+  tourismReady       Boolean  @default(false)
+  nabhCertUrl        String?
+  jciCertUrl         String?
+  internationalPhone String?
+  internationalEmail String?
+  languages          String?
+  rating             Float    @default(4.5)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+  hospital           Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+}
+
+model TourismCoordinator {
+  id         String   @id @default(cuid())
+  hospitalId String
+  staffId    String?
+  name       String
+  email      String?
+  phone      String?
+  languages  String?
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+}
+
+model TourismTestimonial {
+  id             String    @id @default(cuid())
+  hospitalId     String?
+  patientName    String
+  patientCountry String
+  procedure      String
+  rating         Int       @default(5)
+  testimonial    String
+  treatmentDate  String?
+  verified       Boolean   @default(false)
+  createdAt      DateTime  @default(now())
+  hospital       Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+}
+
+model CurrencyRate {
+  id        String   @id @default(cuid())
+  base      String   @default("INR")
+  rates     String
+  fetchedAt DateTime @default(now())
+
+  @@index([fetchedAt])
+}
+
+// ===== Patient Portal Models (Round 22) =====
+
+model PortalUser {
+  id                  String    @id @default(cuid())
+  phone               String    @unique
+  email               String?
+  passwordHash        String?
+  fullName            String
+  dob                 String?
+  gender              String?
+  bloodGroup          String?
+  address             String?
+  city                String?
+  state               String?
+  pincode             String?
+  abhaId              String?
+  profilePhoto        String?
+  hospitalPatientUhid String?
+  clinicPatientMrn    String?
+  pharmacyCustomerId  String?
+  familyHeadId        String?
+  relationToHead      String?
+  isOnboarded         Boolean   @default(false)
+  createdAt           DateTime  @default(now())
+  lastLoginAt         DateTime?
+
+  /**
+   * Nexura DIY back-relations
+   */
+  diyGoals           DiyGoal[]
+  diyPlans           DiyPlan[]
+  diyTaskCompletions DiyTaskCompletion[]
+  diyProgressLogs    DiyProgressLog[]
+  diyConflicts       DiyGoalConflict[]
+  diyConsents        DiyConsent[]
+  diySafetyEvents    DiySafetyEvent[]
+  diyAiAudits        DiyAiAudit[]
+  diyGenerations     DiyGeneration[]
+
+  familyHead    PortalUser?    @relation("FamilyRelation", fields: [familyHeadId], references: [id])
+  familyMembers PortalUser[]   @relation("FamilyRelation")
+  bloodBookings BloodBooking[]
+
+  @@index([phone])
+  @@index([abhaId])
+  @@index([familyHeadId])
+}
+
+model BloodBooking {
+  id                 String    @id @default(cuid())
+  userId             String
+  bookingRef         String    @unique
+  testPanelName      String
+  testPanelCode      String
+  testsIncluded      String
+  price              Int
+  scheduledDate      DateTime
+  timeSlot           String
+  address            String
+  city               String
+  pincode            String
+  phlebotomistId     String?
+  phlebotomistName   String?
+  phlebotomistPhone  String?
+  status             String    @default("booked")
+  sampleCollectedAt  DateTime?
+  reportReadyAt      DateTime?
+  reportJson         String?
+  aiInterpretation   String?
+  paymentMode        String    @default("upi")
+  paymentStatus      String    @default("pending")
+  cancellationReason String?
+  createdAt          DateTime  @default(now())
+
+  user PortalUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, status])
+  @@index([scheduledDate])
+}
+
+model Phlebotomist {
+  id               String   @id @default(cuid())
+  name             String
+  phone            String
+  city             String
+  zones            String
+  vehicleNo        String?
+  rating           Float    @default(4.8)
+  totalCollections Int      @default(0)
+  isAvailable      Boolean  @default(true)
+  currentBookingId String?
+  createdAt        DateTime @default(now())
+
+  @@index([city, isAvailable])
+}
+
+// ============================================================
+// NEXURA OS — unified hospital operating system (v2)
+// ============================================================
+
+model NxStaffUser {
+  id                  String                 @id @default(cuid())
+  hospitalId          String
+  staffCode           String                 @unique // login code e.g. DR.RAJESH
+  name                String
+  role                String // legacy primary role key (kept for compatibility)
+  department          String?
+  departmentId        String?
+  speciality          String?
+  phone               String?
+  email               String? // unique when present
+  passwordHash        String? // bcrypt; null => password login not yet set
+  status              String                 @default("active") // active|suspended|deactivated|invited
+  mfaSecret           String? // TOTP base32 secret
+  mfaEnabled          Boolean                @default(false)
+  failedAttempts      Int                    @default(0)
+  lockedUntil         DateTime?
+  lastLoginAt         DateTime?
+  mustChangePassword  Boolean                @default(false)
+  emailVerifiedAt     DateTime?
+  linkedPatientId     String?
+  onDuty              Boolean                @default(true)
+  shift               String                 @default("morning") // morning|evening|night
+  pinHash             String // bcrypt demo pin
+  createdAt           DateTime               @default(now())
+  updatedAt           DateTime               @updatedAt
+  hospital            Hospital               @relation(fields: [hospitalId], references: [id])
+  departmentRef       NxDepartment?          @relation(fields: [departmentId], references: [id])
+  roleAssignments     NxUserRoleAssignment[]
+  permissionGrants    NxPermissionGrant[]
+  delegationsGiven    NxDelegation[]         @relation("DelegationFrom")
+  delegationsReceived NxDelegation[]         @relation("DelegationTo")
+  sessions            NxSessionRecord[]
+  credentials         NxCredential[]
+  shiftAssignments    NxShiftAssignment[]
+  prefs               NxUserPrefs?
+  notifications       NxNotification[]
+
+  @@index([hospitalId, role])
+  @@index([email])
+  @@index([status])
+}
+
+model NxTask {
+  id               String          @id @default(cuid())
+  hospitalId       String
+  title            String
+  detail           String?
+  type             String          @default("task") // task|order|review|approval|result|escalation|followup|transport|cleaning|handover
+  category         String? // clinical|operational|administrative|infection|medication
+  priority         String          @default("medium") // low|medium|high|critical
+  status           String          @default("new") // new|assigned|in_progress|blocked|waiting|escalated|done|cancelled (legacy open|in_progress|blocked|done|cancelled still accepted)
+  ownerRole        String?
+  ownerName        String?
+  assignedToUserId String?
+  department       String?
+  patientId        String?
+  patientName      String?
+  patientUhid      String?
+  encounterId      String? // admission or appointment context
+  location         String?
+  dueAt            DateTime?
+  startedAt        DateTime?
+  completedAt      DateTime?
+  completionNote   String?
+  checklist        String? // JSON [{text, done}]
+  recurrence       String? // none|daily|weekly|weekdays
+  recurrenceNext   DateTime?
+  handoffFrom      String?
+  handoffTo        String?
+  waitingReason    String?
+  blockedReason    String?
+  slaMinutes       Int?
+  escalationLevel  Int             @default(0)
+  escalatedAt      DateTime?
+  reason           String? // transparent prioritization reason
+  sourceModule     String? // command_center|orders|lab|pharmacy|automations|ed|or
+  relatedId        String?
+  attachments      String? // JSON [{name,size,mime}]
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  hospital         Hospital        @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  comments         NxTaskComment[]
+
+  @@index([hospitalId, status])
+  @@index([ownerRole, status])
+  @@index([priority, dueAt])
+  @@index([assignedToUserId])
+}
+
+model NxIncident {
+  id             String    @id @default(cuid())
+  hospitalId     String
+  severity       String    @default("minor") // info|minor|major|critical
+  status         String    @default("open") // open|acknowledged|investigating|resolved|closed
+  category       String    @default("operational") // clinical|medication|safety|equipment|security|operational|it
+  title          String
+  description    String?
+  location       String?
+  patientId      String?
+  reportedBy     String?
+  acknowledgedAt DateTime?
+  resolvedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+  hospital       Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, status])
+}
+
+model NxAuditEvent {
+  id         String   @id @default(cuid())
+  hospitalId String
+  actorName  String
+  actorRole  String
+  action     String // e.g. order.create | bed.lifecycle | task.complete | auth.login
+  entityType String
+  entityId   String?
+  patientId  String?
+  detail     String? // JSON payload
+  prevHash   String?
+  hash       String? // tamper-evident chain
+  createdAt  DateTime @default(now())
+  // append-only compliance chain — a hospital can never cascade-delete its audit trail
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  @@index([hospitalId, createdAt])
+  @@index([entityType, entityId])
+}
+
+model NxOrderEvent {
+  id         String        @id @default(cuid())
+  hospitalId String
+  orderId    String
+  order      HospitalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  fromStatus String?
+  toStatus   String
+  actorName  String?
+  actorRole  String?
+  note       String?
+  createdAt  DateTime      @default(now())
+  hospital   Hospital      @relation(fields: [hospitalId], references: [id])
+
+  @@index([orderId])
+  @@index([hospitalId])
+}
+
+model NxEquipment {
+  id              String    @id @default(cuid())
+  hospitalId      String
+  name            String
+  category        String // ventilator|infusion_pump|monitor|defibrillator|imaging|bed|wheelchair|lab_instrument
+  assetTag        String    @unique
+  location        String?
+  department      String?
+  status          String    @default("in_service") // in_service|maintenance|fault|retired
+  lastCalibration DateTime?
+  nextMaintenance DateTime?
+  utilization     Int       @default(0) // percent
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  hospital        Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, status])
+}
+
+model NxSupplyItem {
+  id           String       @id @default(cuid())
+  hospitalId   String
+  name         String
+  category     String // medication|consumable|surgical|psc|lab|ppe
+  unit         String       @default("units")
+  onHand       Int          @default(0)
+  reorderLevel Int          @default(10)
+  location     String? // store|ward:<name>|ot|pharmacy
+  batchNo      String?
+  expiryDate   DateTime?
+  supplier     String?
+  updatedAt    DateTime     @updatedAt
+  createdAt    DateTime     @default(now())
+  hospital     Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  txns         NxStockTxn[]
+
+  @@index([hospitalId, category])
+}
+
+model NxMessage {
+  id           String          @id @default(cuid())
+  hospitalId   String
+  channelKey   String // e.g. care-team:<admissionId> | dept:<name> | shift-handover | emergency
+  senderName   String
+  senderRole   String
+  senderUserId String?
+  body         String
+  severity     String          @default("normal") // normal|urgent
+  mentions     String? // JSON [staffCode]
+  attachments  String? // JSON [{name,size,mime}]
+  pinned       Boolean         @default(false)
+  editedAt     DateTime?
+  patientId    String?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+  hospital     Hospital        @relation(fields: [hospitalId], references: [id])
+  reads        NxMessageRead[]
+
+  @@index([channelKey, createdAt])
+  @@index([hospitalId])
+}
+
+model NxAutomationRule {
+  id               String    @id @default(cuid())
+  hospitalId       String
+  name             String
+  description      String?
+  triggerType      String // order.completed | discharge.confirmed | bed.ready | result.critical | appointment.created
+  triggerConfig    String? // JSON
+  conditions       String? // JSON
+  actions          String // JSON array of steps
+  enabled          Boolean   @default(true)
+  requiresApproval Boolean   @default(false)
+  lastRunAt        DateTime?
+  runCount         Int       @default(0)
+  createdAt        DateTime  @default(now())
+  updatedAt        DateTime  @updatedAt
+  hospital         Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, triggerType])
+}
+
+model NxWorkflowRun {
+  id          String    @id @default(cuid())
+  hospitalId  String
+  ruleId      String?
+  ruleName    String
+  patientId   String?
+  patientUhid String?
+  status      String    @default("running") // running|awaiting_approval|completed|failed
+  currentStep String?
+  steps       String // JSON: [{name, status, detail, at}]
+  startedAt   DateTime  @default(now())
+  completedAt DateTime?
+  hospital    Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, startedAt])
+}
+
+model NxAIInteraction {
+  id              String   @id @default(cuid())
+  hospitalId      String
+  userName        String
+  userRole        String
+  feature         String // patient_summary|handover|discharge_draft|queue_explain|ops_recommend|documentation
+  prompt          String?
+  response        String? // AI output snapshot (redacted per retention policy)
+  confidence      Float? // 0..1 self-reported or heuristic confidence
+  consentFlag     Boolean? // patient AI consent verified at call time
+  promptVersion   String? // e.g. patient_summary@3
+  modelVersion    String? // e.g. glm-4.6-air / openrouter:model@hash
+  thresholdAction String? // allowed|human_fallback|blocked
+  status          String   @default("completed") // completed|failed|review_required
+  createdAt       DateTime @default(now())
+  hospital        Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, createdAt])
+}
+
+// ============================================================
+// NEXURA HOSPITAL OS v4 — production foundation
+// Organizations, RBAC-as-data, sessions, notifications,
+// consents, note versions, channels, MAR, billing, inventory,
+// staff ops, integrations, observability.
+// ============================================================
+
+model NxOrganization {
+  id        String     @id @default(cuid())
+  name      String
+  slug      String     @unique
+  logoUrl   String?
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+  hospitals Hospital[]
+}
+
+model NxDepartment {
+  id            String        @id @default(cuid())
+  hospitalId    String
+  name          String
+  code          String
+  floor         String?
+  headStaffName String?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+  hospital      Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  staff         NxStaffUser[]
+
+  @@unique([hospitalId, code])
+  @@index([hospitalId])
+}
+
+model NxSessionRecord {
+  id            String      @id @default(cuid())
+  userId        String
+  jti           String      @unique // token id embedded in JWT
+  userAgent     String?
+  ip            String?
+  deviceLabel   String? // "Remember this device" label
+  trustedDevice Boolean     @default(false)
+  breakGlass    Boolean     @default(false)
+  createdAt     DateTime    @default(now())
+  lastSeenAt    DateTime    @default(now())
+  expiresAt     DateTime
+  revokedAt     DateTime?
+  revokedReason String?
+  user          NxStaffUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+}
+
+model NxLoginAttempt {
+  id        String   @id @default(cuid())
+  staffCode String
+  userId    String?
+  method    String   @default("pin") // pin|password|mfa
+  success   Boolean
+  reason    String? // invalid_credentials|locked|suspended|ok
+  ip        String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  @@index([staffCode, createdAt])
+}
+
+model NxPasswordResetToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model NxEmailVerificationToken {
+  id        String    @id @default(cuid())
+  userId    String
+  tokenHash String    @unique
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model NxUserRoleAssignment {
+  id           String      @id @default(cuid())
+  userId       String
+  roleKey      String // e.g. doctor | nurse | billing_officer | auditor ...
+  hospitalId   String?
+  departmentId String?
+  grantedBy    String?
+  grantedAt    DateTime    @default(now())
+  expiresAt    DateTime? // temporary role elevation
+  user         NxStaffUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([roleKey])
+  @@index([hospitalId])
+}
+
+model NxPermissionGrant {
+  id         String      @id @default(cuid())
+  userId     String
+  permission String // e.g. patient.clinical.view
+  effect     String      @default("allow") // allow|deny
+  scope      String      @default("hospital") // hospital|department|patient
+  scopeRef   String? // department name or patientId
+  reason     String?
+  grantedBy  String?
+  grantedAt  DateTime    @default(now())
+  expiresAt  DateTime?
+  user       NxStaffUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, permission])
+}
+
+model NxDelegation {
+  id         String      @id @default(cuid())
+  fromUserId String
+  toUserId   String
+  roleKey    String? // delegate receives this role's access
+  permission String? // or a single permission
+  reason     String
+  expiresAt  DateTime
+  revokedAt  DateTime?
+  createdAt  DateTime    @default(now())
+  granter    NxStaffUser @relation("DelegationFrom", fields: [fromUserId], references: [id], onDelete: Cascade)
+  delegate   NxStaffUser @relation("DelegationTo", fields: [toUserId], references: [id], onDelete: Cascade)
+
+  @@index([toUserId, expiresAt])
+}
+
+model NxBreakGlassEvent {
+  id          String    @id @default(cuid())
+  hospitalId  String
+  userId      String
+  userName    String
+  userRole    String
+  patientId   String?
+  patientName String?
+  reason      String
+  expiresAt   DateTime
+  revokedAt   DateTime?
+  createdAt   DateTime  @default(now())
+  hospital    Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, createdAt])
+}
+
+model NxNotification {
+  id         String       @id @default(cuid())
+  hospitalId String
+  userId     String? // null = broadcast to roleKey / hospital
+  roleKey    String? // audience role when broadcast
+  title      String
+  body       String?
+  level      String       @default("info") // info|success|warning|critical
+  category   String       @default("system") // task|message|lab|bed|ed|appointment|billing|inventory|system
+  link       String? // in-app deep link e.g. module key or path
+  patientId  String?
+  meta       String? // JSON
+  readAt     DateTime?
+  createdAt  DateTime     @default(now())
+  hospital   Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  user       NxStaffUser? @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, userId, readAt])
+  @@index([roleKey, readAt])
+}
+
+model NxUserPrefs {
+  id        String      @id @default(cuid())
+  userId    String      @unique
+  widgets   String? // JSON: dashboard widget order/visibility per module
+  density   String?
+  updatedAt DateTime    @updatedAt
+  user      NxStaffUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model NxFeatureFlag {
+  id          String   @id @default(cuid())
+  key         String   @unique
+  enabled     Boolean  @default(false)
+  description String?
+  rollout     String? // JSON config
+  updatedBy   String?
+  updatedAt   DateTime @updatedAt
+}
+
+model NxSystemStatus {
+  id        String   @id @default(cuid())
+  key       String   @unique // maintenance_mode | incident_banner | announcement
+  enabled   Boolean  @default(false)
+  message   String?
+  severity  String   @default("info") // info|warning|critical
+  updatedBy String?
+  updatedAt DateTime @updatedAt
+}
+
+model NxConsent {
+  id          String          @id @default(cuid())
+  hospitalId  String
+  patientId   String
+  patientUhid String?
+  type        String // treatment|data_share|research|telemedicine|dhir|financial
+  status      String          @default("granted") // granted|denied|withdrawn|expired
+  scope       String?
+  recordedBy  String
+  note        String?
+  grantedAt   DateTime        @default(now())
+  withdrawnAt DateTime?
+  expiresAt   DateTime?
+  hospital    Hospital        @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient     HospitalPatient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([hospitalId, type])
+}
+
+model NxNoteVersion {
+  id         String       @id @default(cuid())
+  noteId     String
+  version    Int
+  changeKind String       @default("edit") // create|edit|sign|addendum|amend
+  authorName String
+  authorRole String
+  snapshot   String // JSON of note content at this version
+  signedAt   DateTime?
+  createdAt  DateTime     @default(now())
+  note       ClinicalNote @relation(fields: [noteId], references: [id], onDelete: Cascade)
+
+  @@index([noteId])
+}
+
+model NxTaskComment {
+  id         String   @id @default(cuid())
+  taskId     String
+  authorName String
+  authorRole String
+  body       String
+  createdAt  DateTime @default(now())
+  task       NxTask   @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@index([taskId])
+}
+
+model NxTaskView {
+  id        String   @id @default(cuid())
+  userId    String
+  name      String
+  filters   String // JSON
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model NxChannel {
+  id            String            @id @default(cuid())
+  hospitalId    String
+  key           String // unique per hospital
+  kind          String // patient|department|shift|emergency|direct|topic
+  name          String
+  patientId     String?
+  department    String?
+  memberRoles   String? // JSON [roleKey] — roles allowed read/write
+  createdBy     String?
+  archivedAt    DateTime?
+  retentionDays Int               @default(365)
+  createdAt     DateTime          @default(now())
+  hospital      Hospital          @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  members       NxChannelMember[]
+
+  @@unique([hospitalId, key])
+  @@index([hospitalId, kind])
+}
+
+model NxChannelMember {
+  id         String    @id @default(cuid())
+  channelId  String
+  userId     String
+  memberName String
+  memberRole String
+  joinedAt   DateTime  @default(now())
+  lastReadAt DateTime?
+  channel    NxChannel @relation(fields: [channelId], references: [id], onDelete: Cascade)
+
+  @@unique([channelId, userId])
+}
+
+model NxMessageRead {
+  id        String    @id @default(cuid())
+  messageId String
+  userId    String
+  readAt    DateTime  @default(now())
+  message   NxMessage @relation(fields: [messageId], references: [id], onDelete: Cascade)
+
+  @@unique([messageId, userId])
+}
+
+model NxMedicationAdministration {
+  id             String          @id @default(cuid())
+  hospitalId     String
+  patientId      String
+  patientUhid    String
+  prescriptionId String?
+  orderId        String?
+  medicineName   String
+  dose           String?
+  route          String?
+  scheduledAt    DateTime
+  administeredAt DateTime?
+  administeredBy String?
+  status         String          @default("pending") // pending|given|held|refused|missed
+  notes          String?
+  controlled     Boolean         @default(false)
+  createdAt      DateTime        @default(now())
+  hospital       Hospital        @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient        HospitalPatient @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([patientId, scheduledAt])
+  @@index([hospitalId, status])
+}
+
+model NxImagingReport {
+  id              String        @id @default(cuid())
+  hospitalId      String
+  orderId         String
+  modality        String        @default("xray") // xray|ct|mri|ultrasound|pet
+  findings        String?
+  impression      String?
+  radiologistName String?
+  status          String        @default("preliminary") // preliminary|final|amended
+  reportUrl       String?
+  createdAt       DateTime      @default(now())
+  hospital        Hospital      @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  order           HospitalOrder @relation(fields: [orderId], references: [id], onDelete: Cascade)
+
+  @@index([orderId])
+  @@index([hospitalId])
+}
+
+model NxCharge {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  patientId   String
+  patientUhid String?
+  billId      String?
+  encounterId String?
+  code        String? // service code
+  description String
+  quantity    Int      @default(1)
+  unitPrice   Int // paise
+  discount    Int      @default(0)
+  category    String   @default("general") // room|procedure|pharmacy|lab|consultation|consumable
+  status      String   @default("pending") // pending|invoiced|cancelled
+  createdBy   String?
+  createdAt   DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([hospitalId, status])
+}
+
+model NxPayment {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  patientId   String
+  patientUhid String?
+  billId      String?
+  amount      Int // paise
+  mode        String   @default("upi") // cash|card|upi|netbanking|insurance|cheque
+  reference   String?
+  receivedBy  String?
+  note        String?
+  refundOfId  String? // refunds point at original payment
+  receivedAt  DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([billId])
+  @@index([hospitalId])
+}
+
+model NxVendor {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  name        String
+  contactName String?
+  phone       String?
+  email       String?
+  gstin       String?
+  rating      Float    @default(4)
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId])
+}
+
+model NxPurchaseOrder {
+  id         String    @id @default(cuid())
+  hospitalId String
+  poNumber   String    @unique
+  vendorId   String
+  vendorName String?
+  status     String    @default("draft") // draft|submitted|partially_received|received|cancelled
+  items      String // JSON [{name,qty,unit,unitPrice}]
+  totalValue Int       @default(0)
+  raisedBy   String?
+  expectedAt DateTime?
+  receivedAt DateTime?
+  notes      String?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+  hospital   Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, status])
+}
+
+model NxStockTxn {
+  id         String       @id @default(cuid())
+  hospitalId String
+  itemId     String
+  kind       String // receipt|issue|adjust|wastage|transfer_in|transfer_out
+  qty        Int
+  batchNo    String?
+  reason     String?
+  actorName  String?
+  createdAt  DateTime     @default(now())
+  item       NxSupplyItem @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  hospital   Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([itemId, createdAt])
+  @@index([hospitalId])
+}
+
+model NxCredential {
+  id          String      @id @default(cuid())
+  staffUserId String
+  kind        String      @default("license") // license|certification|training|badge
+  name        String
+  issuedBy    String?
+  issuedAt    DateTime?
+  expiresAt   DateTime
+  verified    Boolean     @default(false)
+  documentId  String?
+  createdAt   DateTime    @default(now())
+  user        NxStaffUser @relation(fields: [staffUserId], references: [id], onDelete: Cascade)
+
+  @@index([staffUserId, expiresAt])
+}
+
+model NxShiftAssignment {
+  id          String      @id @default(cuid())
+  staffUserId String
+  hospitalId  String
+  date        DateTime
+  shift       String      @default("morning") // morning|evening|night
+  onCall      Boolean     @default(false)
+  note        String?
+  createdAt   DateTime    @default(now())
+  user        NxStaffUser @relation(fields: [staffUserId], references: [id], onDelete: Cascade)
+  hospital    Hospital    @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, date])
+  @@index([staffUserId])
+}
+
+model NxAppointmentWaitlist {
+  id                    String    @id @default(cuid())
+  hospitalId            String
+  patientId             String
+  patientName           String?
+  doctorId              String?
+  department            String?
+  preferredDate         DateTime?
+  priority              String    @default("routine") // routine|urgent|vip
+  reason                String?
+  status                String    @default("waiting") // waiting|promoted|cancelled|expired
+  promotedAppointmentId String?
+  createdAt             DateTime  @default(now())
+  hospital              Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, status])
+}
+
+model NxAppointmentEvent {
+  id            String   @id @default(cuid())
+  hospitalId    String
+  appointmentId String
+  fromStatus    String?
+  toStatus      String
+  actorName     String?
+  note          String?
+  createdAt     DateTime @default(now())
+  hospital      Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([appointmentId])
+  @@index([hospitalId])
+}
+
+model NxWebhookEndpoint {
+  id            String    @id @default(cuid())
+  hospitalId    String
+  name          String
+  url           String
+  secret        String // HMAC secret for outbound signatures
+  events        String // JSON string[] of WebhookEvent or "*"
+  active        Boolean   @default(true)
+  failureCount  Int       @default(0)
+  lastSuccessAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  hospital      Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, active])
+}
+
+model NxWebhookDelivery {
+  id            String    @id @default(cuid())
+  hospitalId    String?
+  event         String
+  targetUrl     String
+  payload       String
+  status        String    @default("pending") // pending|delivered|failed|dead
+  attempts      Int       @default(0)
+  maxAttempts   Int       @default(5)
+  endpointId    String?
+  latencyMs     Int?
+  lastAttemptAt DateTime?
+  responseCode  Int?
+  nextRetryAt   DateTime?
+  error         String?
+  createdAt     DateTime  @default(now())
+  hospital      Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([status, nextRetryAt])
+  @@index([hospitalId])
+}
+
+model NxIntegrationEvent {
+  id         String    @id @default(cuid())
+  hospitalId String?
+  source     String // nexura|lab-interface|pacs|insurance|pharmacy-network
+  event      String
+  payload    String?
+  status     String    @default("received") // received|processed|failed
+  error      String?
+  createdAt  DateTime  @default(now())
+  hospital   Hospital? @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
+  @@index([hospitalId])
+}
+
+model NxFileObject {
+  id         String           @id @default(cuid())
+  hospitalId String
+  name       String
+  mime       String
+  size       Int
+  category   String           @default("document") // document|report|image|attachment
+  patientId  String?
+  ownerId    String?
+  ownerName  String?
+  data       String? // base64 for small demo files; production uses object storage
+  url        String?
+  scanStatus String           @default("pending") // pending|clean|infected|skipped — malware scan integration point
+  createdAt  DateTime         @default(now())
+  hospital   Hospital         @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  patient    HospitalPatient? @relation(fields: [patientId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, category])
+  @@index([patientId])
+}
+
+model NxIdempotency {
+  id             String   @id @default(cuid())
+  key            String   @unique
+  endpoint       String
+  userId         String?
+  requestHash    String
+  responseStatus Int?
+  responseBody   String?
+  createdAt      DateTime @default(now())
+  expiresAt      DateTime
+
+  @@index([expiresAt])
+}
+
+// ============================================================
+// NEXURA HOSPITAL OS v5 — Chief Future Architect layer
+// Tenancy, interoperability, governance, patient-centric PoCs.
+// ALL ADDITIVE: existing tenants/hospitals keep working unchanged.
+// ============================================================
+
+model NxTenant {
+  id           String     @id @default(cuid())
+  code         String     @unique // slug e.g. "apollo-group"
+  name         String
+  plan         String     @default("standard") // basic|standard|premium|ngo
+  status       String     @default("active") // active|suspended|offboarding
+  brandingJson String? // JSON {primary,logoText,locale,defaultTheme}
+  modulesJson  String? // JSON string[] of enabled module keys (null = all standard)
+  domainsJson  String? // JSON string[] custom domains
+  settingsJson String? // JSON {offlineMode,retentionProfile,aiThresholds}
+  createdAt    DateTime   @default(now())
+  updatedAt    DateTime   @updatedAt
+  hospitals    Hospital[]
+  apiKeys      NxApiKey[]
+
+  @@index([status])
+}
+
+model NxApiKey {
+  id              String    @id @default(cuid())
+  tenantId        String
+  name            String
+  prefix          String // display prefix e.g. nxk_live_ab12
+  keyHash         String    @unique // sha256 of full secret
+  scopes          String // JSON string[] e.g. ["patients.read","observations.read"]
+  rateLimitPerMin Int       @default(60)
+  lastUsedAt      DateTime?
+  revokedAt       DateTime?
+  createdAt       DateTime  @default(now())
+  tenant          NxTenant  @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+}
+
+model NxAbacPolicy {
+  id           String   @id @default(cuid())
+  hospitalId   String
+  role         String? // null = applies to all roles
+  effect       String   @default("allow") // allow|deny
+  deptScope    String? // JSON string[] department ids/names
+  wardScope    String? // JSON string[] ward ids/names
+  patientScope String   @default("any") // any|assigned|ward
+  timeWindows  String? // JSON [{days:[1-7],from:"HH:MM",to:"HH:MM"}]
+  action       String // read|write|sign|dispense|approve (or *)
+  resource     String // patients|notes|orders|billing|medications|*
+  active       Boolean  @default(true)
+  note         String?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  hospital     Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, resource])
+}
+
+model NxEscalationPolicy {
+  id         String   @id @default(cuid())
+  hospitalId String
+  alertType  String // result.critical|incident.critical|med.safety|ed.overflow
+  levelsJson String // JSON [{afterMin,notifyRoles:[],notifyUsers:[],channel}]
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, alertType])
+}
+
+model NxEscalationEvent {
+  id         String   @id @default(cuid())
+  hospitalId String
+  policyId   String?
+  alertType  String
+  entityRef  String // e.g. "task:cuid" | "incident:cuid"
+  level      Int      @default(0)
+  actorName  String?
+  detailJson String?
+  createdAt  DateTime @default(now())
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, createdAt])
+}
+
+model NxPathwayDef {
+  id         String         @id @default(cuid())
+  hospitalId String
+  code       String // sepsis-bundle|discharge-hf|chest-pain
+  name       String
+  specialty  String?
+  version    Int            @default(1)
+  stepsJson  String // DSL JSON [{id,title,withinMin,requires:[],onComplete:...,critical:true}]
+  active     Boolean        @default(true)
+  createdAt  DateTime       @default(now())
+  updatedAt  DateTime       @updatedAt
+  hospital   Hospital       @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  runs       NxPathwayRun[]
+
+  @@index([hospitalId, code])
+}
+
+model NxPathwayRun {
+  id          String       @id @default(cuid())
+  hospitalId  String
+  defId       String
+  patientId   String?
+  patientName String?
+  currentStep String
+  stateJson   String? // JSON {completed:[stepId],skipped:[],evidence:{}}
+  status      String       @default("active") // active|completed|escalated|cancelled
+  startedBy   String?
+  startedAt   DateTime     @default(now())
+  updatedAt   DateTime     @updatedAt
+  hospital    Hospital     @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  definition  NxPathwayDef @relation(fields: [defId], references: [id])
+
+  @@index([hospitalId, status])
+  @@index([defId])
+}
+
+model NxTimestampBlock {
+  id         String   @id @default(cuid())
+  hospitalId String
+  index      Int
+  merkleRoot String
+  leafCount  Int
+  prevHash   String?
+  blockHash  String
+  anchoredAt DateTime @default(now())
+  // append-only compliance chain — a hospital can never cascade-delete its audit trail
+  hospital   Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  @@unique([hospitalId, index])
+}
+
+model NxVerifiableCredential {
+  id         String    @id @default(cuid())
+  patientId  String
+  type       String // NexuraHealthID|ImmunizationProof|ConsentScope
+  claimsJson String
+  issuerId   String // hospital/tenant issuer ref
+  signature  String // HMAC-SHA256 over canonical claims (PoC; ED25519 in prod)
+  holderHint String? // patient-controlled hint (e.g. last4 of ABIHA)
+  issuedAt   DateTime  @default(now())
+  expiresAt  DateTime?
+  revokedAt  DateTime?
+  hospitalId String
+  hospital   Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([hospitalId])
+}
+
+model NxInsuranceContract {
+  id             String   @id @default(cuid())
+  hospitalId     String
+  patientId      String?
+  patientName    String?
+  insurer        String
+  policyNo       String
+  milestonesJson String // JSON [{id,title,amount,condition,met,metAt}]
+  state          String   @default("draft") // draft|active|milestone_met|submitted|settled|disputed
+  payoutTotal    Int      @default(0) // paise
+  settledAmount  Int      @default(0) // paise
+  historyJson    String? // JSON [{at,state,actor,note}]
+  claimId        String?
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+  hospital       Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, state])
+}
+
+model NxWearableDevice {
+  id         String             @id @default(cuid())
+  hospitalId String
+  patientId  String
+  source     String // apple_health|whoop|fitbit|manual
+  model      String?
+  active     Boolean            @default(true)
+  pairedAt   DateTime           @default(now())
+  secretHash String? // sha256(deviceSecret) — HMAC ingest auth; null = legacy unpaired device
+  hospital   Hospital           @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+  samples    NxWearableSample[]
+
+  @@index([patientId])
+  @@index([hospitalId])
+}
+
+model NxWearableSample {
+  id         String           @id @default(cuid())
+  deviceId   String
+  metric     String // hrv|resting_hr|spo2|steps|sleep_minutes
+  value      Float
+  unit       String?
+  capturedAt DateTime
+  ingestedAt DateTime         @default(now())
+  device     NxWearableDevice @relation(fields: [deviceId], references: [id], onDelete: Cascade)
+
+  @@index([deviceId, capturedAt])
+}
+
+model NxGenomicProfile {
+  id           String   @id @default(cuid())
+  hospitalId   String
+  patientId    String
+  vaultRef     String // external vault pointer — raw genotype NEVER stored here
+  variantsJson String? // JSON [{gene,variant,zygosity,classpath}]
+  riskJson     String? // JSON {cardio:0.12,diabetes:0.31,...}
+  consentId    String? // links NxConsent
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  hospital     Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([hospitalId])
+}
+
+model NxSimulationScenario {
+  id         String            @id @default(cuid())
+  code       String            @unique
+  title      String
+  audience   String            @default("clinician") // clinician|student|public
+  difficulty String            @default("intermediate")
+  treeJson   String // adaptive branching tree DSL
+  active     Boolean           @default(true)
+  createdAt  DateTime          @default(now())
+  runs       NxSimulationRun[]
+
+  @@index([audience])
+}
+
+model NxSimulationRun {
+  id          String               @id @default(cuid())
+  scenarioId  String
+  subjectType String               @default("staff") // staff|patient|visitor
+  subjectName String?
+  choicesJson String // JSON path taken
+  outcome     String
+  score       Float                @default(0)
+  createdAt   DateTime             @default(now())
+  scenario    NxSimulationScenario @relation(fields: [scenarioId], references: [id], onDelete: Cascade)
+
+  @@index([scenarioId, createdAt])
+}
+
+model NxPlugin {
+  id              String   @id @default(cuid())
+  code            String   @unique
+  name            String
+  version         String
+  vendor          String?
+  permissionsJson String // JSON string[] e.g. ["patients.read"]
+  entryJson       String // JSON {kind:"panel"|"hook", route, slots:[]}
+  enabled         Boolean  @default(false)
+  installedAt     DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+}
+
+model NxHospitalTemplate {
+  id         String   @id @default(cuid())
+  code       String   @unique
+  name       String
+  kind       String // multispecialty|clinic|ngo-rural|nursing-home
+  configJson String // JSON {modules,departments,wards,roles,locales,settings}
+  createdAt  DateTime @default(now())
+}
+
+model NxTeleConsult {
+  id            String    @id @default(cuid())
+  hospitalId    String
+  patientId     String
+  patientName   String?
+  doctorId      String?
+  doctorName    String?
+  state         String    @default("requested") // requested|routed|live|completed|failed|cancelled
+  bandwidthMode String    @default("auto") // auto|low|text-only
+  routedReason  String?
+  consentId     String? // NxConsent reference
+  eSignHash     String?
+  startedAt     DateTime?
+  endedAt       DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+  hospital      Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, state])
+}
+
+model NxAiThreshold {
+  id            String   @id @default(cuid())
+  hospitalId    String
+  feature       String
+  minConfidence Float    @default(0.6)
+  requireReview Boolean  @default(true)
+  updatedAt     DateTime @updatedAt
+  hospital      Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@unique([hospitalId, feature])
+}
+
+model NxAiFeedback {
+  id            String   @id @default(cuid())
+  hospitalId    String
+  interactionId String
+  staffName     String
+  staffRole     String
+  verdict       String // accepted|corrected|rejected
+  correction    String?
+  notes         String?
+  createdAt     DateTime @default(now())
+  hospital      Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([interactionId])
+  @@index([hospitalId])
+}
+
+model NxDicomStudy {
+  id          String    @id @default(cuid())
+  hospitalId  String
+  patientId   String
+  accession   String
+  studyUid    String
+  modality    String // CXR|CT|MR|US|ECG
+  bodyPart    String?
+  seriesCount Int       @default(1)
+  viewerUrl   String? // external viewer deep link (OHIF etc.)
+  status      String    @default("received") // received|reporting|reported
+  reportedBy  String?
+  reportedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  hospital    Hospital  @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId])
+  @@index([hospitalId])
+}
+
+model NxDocVersion {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  entityType  String // sbar|journey_summary|care_plan|discharge
+  entityId    String
+  version     Int
+  changeKind  String   @default("edit") // create|edit|coauthor|sign
+  authorName  String
+  authorRole  String
+  content     String
+  trackedJson String? // JSON [{field,from,to}]
+  createdAt   DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([hospitalId, entityType, entityId])
+}
+
+model NxJourneyAnnotation {
+  id          String   @id @default(cuid())
+  hospitalId  String
+  patientId   String
+  eventRef    String? // journey event id this annotates
+  authorName  String
+  authorRole  String
+  body        String
+  decisionLog Boolean  @default(false)
+  createdAt   DateTime @default(now())
+  hospital    Hospital @relation(fields: [hospitalId], references: [id], onDelete: Cascade)
+
+  @@index([patientId, createdAt])
+  @@index([hospitalId])
+}
+
+model NxEventLog {
+  id            String   @id @default(cuid())
+  hospitalId    String
+  aggregateType String // appointment|admission|order|bed|task
+  aggregateId   String
+  type          String
+  seq           Int
+  payloadJson   String?
+  actorName     String?
+  createdAt     DateTime @default(now())
+  // append-only compliance chain — a hospital can never cascade-delete its audit trail
+  hospital      Hospital @relation(fields: [hospitalId], references: [id], onDelete: Restrict)
+
+  // Per-aggregate sequence integrity: one row per (hospital, aggregate, seq).
+  // The unique index also serves the read path that previously used the plain index.
+  @@unique([hospitalId, aggregateType, aggregateId, seq], map: "nxeventlog_aggregate_seq_key")
+}
+
+// ============================================================
+// PIE — PREDICTIVE INTELLIGENCE ENGINE
+// "Healthcare is Reactive. Nexura Makes it Predictive."
+// Multi-modal ingestion, living digital twin, pre-emptive
+// protocols, federated learning, governed as Class II SaMD.
+// ============================================================
+
+model PieBioSignal {
+  id         String   @id @default(cuid())
+  deviceId   String
+  patientId  String?
+  metric     String // heart_rate|hrv|spo2|sleep_stage|glucose|resp_rate|temp|systolic|diastolic|steps
+  value      Float
+  unit       String?
+  quality    Float    @default(1) // 0..1 signal quality flag
+  capturedAt DateTime
+  ingestedAt DateTime @default(now())
+
+  @@index([patientId, metric, capturedAt])
+  @@index([deviceId, capturedAt])
+  @@map("pie_bio_signals")
+}
+
+model PieLifeStreamEvent {
+  id            String   @id @default(cuid())
+  patientId     String
+  hospitalId    String?
+  source        String // vitals|labs|medications|encounters|notes|bio|sdoh|behavior
+  kind          String // observation|result|order|note_extract|signal|context|adherence
+  conceptCode   String? // SNOMED-CT or ICD-10 mapped concept
+  conceptSystem String? // SNOMED|ICD10|LOINC|LOCAL
+  title         String
+  value         Float?
+  unit          String?
+  severity      String? // info|watch|alert
+  outlier       Boolean  @default(false) // cleansed z-score outlier, retained but flagged
+  dataJson      String?
+  ts            DateTime
+  createdAt     DateTime @default(now())
+
+  @@index([patientId, ts])
+  @@index([patientId, source, ts])
+  @@map("pie_lifestream_events")
+}
+
+model PieTwinState {
+  id           String   @id @default(cuid())
+  patientId    String   @unique
+  stateJson    String // high-dimensional state vector snapshot
+  baselineJson String // physics-based baseline parameters
+  weightsJson  String? // per-patient series-model correction weights
+  updatedAt    DateTime @default(now())
+
+  @@map("pie_twin_states")
+}
+
+model PieRiskAssessment {
+  id           String   @id @default(cuid())
+  patientId    String
+  hospitalId   String?
+  domain       String // sepsis|readmission|chronic_deterioration|cardiac|composite
+  score        Float // Time-to-Decay 0..100
+  band         String // green|yellow|red
+  confidence   Float // 0..1, <0.8 => uncertain, manual review
+  horizonHours Int      @default(24)
+  driversJson  String // SHAP-like attribution, top factors
+  trendJson    String? // recent score trajectory for sparklines
+  modelVersion String
+  uncertain    Boolean  @default(false)
+  reviewedBy   String?
+  createdAt    DateTime @default(now())
+
+  @@index([patientId, createdAt])
+  @@index([hospitalId, band, createdAt])
+  @@map("pie_risk_assessments")
+}
+
+model PieProtocol {
+  id             String    @id @default(cuid())
+  patientId      String
+  assessmentId   String?
+  code           String // sepsis_bundle|hf_exacerbation|dka|htn_urgency|hypoglycemia|aki|copd
+  title          String
+  alert          String
+  primaryDriver  String
+  immediateJson  String // JSON action list
+  monitoringJson String
+  dispo          String?
+  evidence       String
+  confidence     Float
+  status         String    @default("pending_approval") // pending_approval|approved|rejected|executed
+  createdBy      String    @default("PIE")
+  approvedBy     String?
+  approvedAt     DateTime?
+  executedAt     DateTime?
+  tasksCreated   Boolean   @default(false)
+  rejectReason   String?
+  createdAt      DateTime  @default(now())
+
+  @@index([patientId, status, createdAt])
+  @@map("pie_protocols")
+}
+
+model PieGraphNode {
+  id        String  @id @default(cuid())
+  label     String // Patient|Condition|Gene|Drug|LifestyleFactor|Environment|Observation
+  key       String // stable business key e.g. patient:uhid, drug:metformin
+  propsJson String?
+
+  @@unique([label, key])
+  @@map("pie_graph_nodes")
+}
+
+model PieGraphEdge {
+  id         String  @id @default(cuid())
+  type       String // HIGH_RISK_OF|INTERACTS_WITH|HAS_CONDITION|EXPOSED_TO|SIMILAR_TO|IMPROVES|WORSENS
+  fromNodeId String
+  toNodeId   String
+  weight     Float   @default(1)
+  propsJson  String?
+
+  @@unique([type, fromNodeId, toNodeId])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+  @@map("pie_graph_edges")
+}
+
+model PieSdohProfile {
+  id              String   @id @default(cuid())
+  patientId       String   @unique
+  regionKey       String // pincode or district key
+  aqi             Int?
+  tempC           Float?
+  humidity        Float?
+  foodDesertKm    Float?
+  crimeIndex      Float?
+  greenSpaceIndex Float?
+  updatedFrom     String   @default("nexura-regional-dataset")
+  updatedAt       DateTime @default(now())
+
+  @@map("pie_sdoh_profiles")
+}
+
+model PieAdherenceEvent {
+  id        String   @id @default(cuid())
+  patientId String
+  kind      String // med_logged|med_missed|appointment_kept|appointment_missed|app_login|plan_task_done|sleep_debt
+  value     Float    @default(1)
+  ts        DateTime @default(now())
+
+  @@index([patientId, ts])
+  @@map("pie_adherence_events")
+}
+
+model PieFederatedUpdate {
+  id          String   @id @default(cuid())
+  tenantId    String
+  modelId     String // sepsis_early_warning|readmission|chronic_decay
+  versionBase String
+  versionNew  String
+  deltaJson   String // weight deltas only — no patient data leaves the tenant
+  samples     Int
+  loss        Float?
+  aggregated  Boolean  @default(false)
+  uploadedAt  DateTime @default(now())
+
+  @@index([modelId, aggregated, uploadedAt])
+  @@map("pie_federated_updates")
+}
+
+model PieModelRegistry {
+  id             String   @id @default(cuid())
+  modelId        String
+  version        String
+  samdClass      String   @default("Class II SaMD")
+  stage          String   @default("validated") // experimental|validated|production|retired
+  trainingWindow String // e.g. "2025-01..2026-08 retrospective, n=18420"
+  validationJson String // sensitivity/specificity/AUROC etc.
+  driftBaseline  Float    @default(0.85)
+  status         String   @default("active")
+  registeredAt   DateTime @default(now())
+
+  @@unique([modelId, version])
+  @@map("pie_model_registry")
+}
+
+model PieBiasAudit {
+  id        String   @id @default(cuid())
+  modelId   String
+  slice     String // age|gender|ethnicity
+  groupA    String
+  groupB    String
+  rateA     Float
+  rateB     Float
+  ratio     Float // min/max disparate impact ratio; >=0.8 passes four-fifths rule
+  pass      Boolean
+  createdAt DateTime @default(now())
+
+  @@index([modelId, createdAt])
+  @@map("pie_bias_audits")
+}
+
+/**
+ * ============================================================
+ * NEXURA PREDICTIVE — HEALTH FORESIGHT ENGINE
+ * Deterministic, explainable disease-risk signal engine for
+ * Indian users. One table: every run stores its full input
+ * + generated report so trends and history survive reloads.
+ * No diagnosis claims — signal levels within screening scope.
+ * ============================================================
+ */
+
+model ForesightRun {
+  id          String   @id @default(cuid())
+  subjectKey  String
+  score       Int
+  band        String
+  triageLevel String   @default("STANDARD")
+  topDomainId String
+  inputJson   String
+  reportJson  String
+  engineVer   String
+  createdAt   DateTime @default(now())
+
+  @@index([subjectKey, createdAt])
+}
+
+/**
+ * ============================================================
+ * NEXURA DIY — consumer wellness roadmap module
+ * 13 models: goals → plans (versioned) → milestones → tasks,
+ * completions/progress, conflicts, granular consent, safety
+ * events, plan changes, source-bound knowledge, AI audit,
+ * idempotent generations. All identity = PortalUser.
+ * ============================================================
+ */
+
+model DiyGoal {
+  id                     String     @id @default(cuid())
+  userId                 String
+  user                   PortalUser @relation(fields: [userId], references: [id], onDelete: Cascade)
+  batchId                String
+  clientKey              String
+  rawGoalText            String
+  normalizedText         String
+  category               String
+  status                 String     @default("DRAFTED")
+  timeframeDays          Int?
+  requestedTimeframeDays Int?
+  confidence             Float      @default(0.5)
+  needsClarify           Boolean    @default(false)
+  clarifyQuestion        String?
+  priority               Int        @default(2)
+  createdAt              DateTime   @default(now())
+  updatedAt              DateTime   @updatedAt
+  diyPlans               DiyPlan[]
+
+  @@unique([userId, batchId, clientKey])
+  @@index([userId, status])
+  @@index([userId, category])
+}
+
+model DiyPlan {
+  id               String    @id @default(cuid())
+  goalId           String
+  goal             DiyGoal   @relation(fields: [goalId], references: [id], onDelete: Cascade)
+  userId           String
+  version          Int       @default(1)
+  status           String    @default("ACTIVE")
+  roadmap          String
+  sourcePack       String
+  sourceKeys       String
+  aiEnriched       Boolean   @default(false)
+  contentValidated Boolean   @default(false)
+  burdenScore      Float     @default(0)
+  createdAt        DateTime  @default(now())
+  retiredAt        DateTime?
+
+  milestones   DiyMilestone[]
+  tasks        DiyTask[]
+  changes      DiyPlanChange[]
+  portalUser   PortalUser?     @relation(fields: [portalUserId], references: [id])
+  portalUserId String?
+
+  @@index([userId, status])
+  @@index([goalId, version])
+}
+
+model DiyMilestone {
+  id        String  @id @default(cuid())
+  planId    String
+  plan      DiyPlan @relation(fields: [planId], references: [id], onDelete: Cascade)
+  title     String
+  detail    String?
+  targetDay Int
+  sort      Int     @default(0)
+
+  @@index([planId, targetDay])
+}
+
+model DiyTask {
+  id          String   @id @default(cuid())
+  planId      String
+  plan        DiyPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  milestoneId String?
+  title       String
+  detail      String?
+  cadence     String   @default("DAILY")
+  estMinutes  Int      @default(10)
+  dayOffset   Int      @default(0)
+  category    String
+  active      Boolean  @default(true)
+  createdAt   DateTime @default(now())
+
+  completions DiyTaskCompletion[]
+
+  @@index([planId, active])
+  @@index([category])
+}
+
+model DiyTaskCompletion {
+  id           String      @id @default(cuid())
+  taskId       String
+  task         DiyTask     @relation(fields: [taskId], references: [id], onDelete: Cascade)
+  userId       String
+  date         String
+  status       String      @default("DONE")
+  note         String?
+  createdAt    DateTime    @default(now())
+  portalUser   PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId String?
+
+  @@unique([taskId, userId, date])
+  @@index([userId, date])
+}
+
+model DiyProgressLog {
+  id             String      @id @default(cuid())
+  userId         String
+  date           String
+  completedTasks Int         @default(0)
+  skippedTasks   Int         @default(0)
+  symptoms       String?
+  mood           Int?
+  energy         Int?
+  sleep          Int?
+  userNotes      String?
+  createdAt      DateTime    @default(now())
+  portalUser     PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId   String?
+
+  @@unique([userId, date])
+}
+
+model DiyGoalConflict {
+  id           String      @id @default(cuid())
+  userId       String
+  goalAId      String
+  goalBId      String
+  rule         String
+  explanation  String
+  resolution   String      @default("TRIMMED")
+  createdAt    DateTime    @default(now())
+  portalUser   PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId String?
+
+  @@index([userId])
+}
+
+model DiyConsent {
+  id            String      @id @default(cuid())
+  userId        String
+  consentType   String
+  purpose       String
+  scope         String
+  policyVersion String
+  source        String
+  grantedAt     DateTime    @default(now())
+  withdrawnAt   DateTime?
+  portalUser    PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId  String?
+
+  @@index([userId, consentType])
+}
+
+model DiySafetyEvent {
+  id             String      @id @default(cuid())
+  userId         String?
+  kind           String
+  severity       String
+  matchedPattern String
+  sourceSnippet  String
+  action         String
+  createdAt      DateTime    @default(now())
+  portalUser     PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId   String?
+
+  @@index([userId, createdAt])
+  @@index([kind, createdAt])
+}
+
+model DiyPlanChange {
+  id        String   @id @default(cuid())
+  planId    String
+  plan      DiyPlan  @relation(fields: [planId], references: [id], onDelete: Cascade)
+  fromVer   Int
+  toVer     Int
+  reason    String
+  summary   String
+  createdAt DateTime @default(now())
+
+  @@index([planId])
+}
+
+model DiyKnowledgeSource {
+  id            String   @id @default(cuid())
+  key           String   @unique
+  title         String
+  role          String
+  license       String
+  reviewStatus  String   @default("INTERNAL_REVIEW")
+  url           String?
+  prohibitedUse String?
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+}
+
+model DiyAiAudit {
+  id           String      @id @default(cuid())
+  userId       String?
+  capability   String
+  model        String
+  latencyMs    Int
+  requestId    String
+  inputHash    String
+  createdAt    DateTime    @default(now())
+  portalUser   PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId String?
+
+  @@index([userId, createdAt])
+}
+
+model DiyGeneration {
+  id             String      @id @default(cuid())
+  userId         String
+  idempotencyKey String      @unique
+  status         String      @default("COMPLETED")
+  planIds        String
+  createdAt      DateTime    @default(now())
+  portalUser     PortalUser? @relation(fields: [portalUserId], references: [id])
+  portalUserId   String?
+
+  @@index([userId, createdAt])
+}
+
+// ============================================================
+// NEXURA OS — BACKEND CORE (backend-core-1)
+// ============================================================
+
+// Durable background job queue. Single-node safe (SQLite WAL or
+// Postgres row locks) — claim is a guarded conditional update, so
+// concurrent workers can never double-run a job.
+model NxJob {
+  id          String    @id @default(cuid())
+  type        String
+  dedupeKey   String    @unique
+  payload     String    @default("{}")
+  status      String    @default("pending") // pending | running | done | failed | dead
+  runAt       DateTime  @default(now())
+  maxAttempts Int       @default(3)
+  attempts    Int       @default(0)
+  lastError   String?
+  startedAt   DateTime?
+  finishedAt  DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  @@index([status, runAt])
+  @@index([type, status])
+}
+
+// Verified family invites — a portal head can no longer attach an
+// existing onboarded PortalUser by phone alone; the invite must be
+// accepted with a one-time token before any linkage happens.
+model PortalFamilyInvite {
+  id         String    @id @default(cuid())
+  headId     String
+  phone      String
+  fullName   String
+  relation   String
+  tokenHash  String    @unique // sha256(one-time token); plaintext never stored
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([phone])
+  @@index([headId])
+}
+
+// AI cost/token ledger — every canonical-client AI call (src/lib/openrouter.ts)
+// records what it consumed: which feature (capability), which provider path,
+// token counts, and cost in integer micro-USD (never float money).
+// tokenSource/costSource are separate on purpose: a provider may report exact
+// tokens while cost still comes from our local price table (estimated).
+// No prompt or completion CONTENT is ever stored here — metadata only.
+model AiUsageLog {
+  id               String   @id @default(cuid())
+  capability       String // feature label, e.g. "kyh.food-scan", "nx.ai.patient_summary"
+  provider         String // openrouter | z-ai
+  model            String // canonical requested model id
+  tokensPrompt     Int?
+  tokensCompletion Int?
+  tokensTotal      Int?
+  costMicroUsd     Int? // integer millionths of USD
+  tokenSource      String // provider | estimated | unknown
+  costSource       String // provider | estimated | unknown
+  latencyMs        Int
+  success          Boolean
+  fallbackUsed     Boolean // openrouter attempted, z-ai SDK served the call
+  errorCode        String? // truncated failure reason; null on success
+  requestId        String?
+  // Per-request identity — captured from the VERIFIED session (staff guard
+  // or portal session token) at call time. Null = system/background call,
+  // honestly unattributed; never guessed.
+  userId           String?
+  userRole         String?
+  createdAt        DateTime @default(now())
+
+  @@index([capability, createdAt])
+  @@index([provider, createdAt])
+  @@index([createdAt])
+}

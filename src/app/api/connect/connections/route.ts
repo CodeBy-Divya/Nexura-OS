@@ -1,0 +1,198 @@
+import { NextRequest, NextResponse } from "next/server";
+import { db } from "@/lib/db";
+import { log } from "@/lib/logger";
+import { connectGate, doctorOnly } from "@/lib/nx/connect-auth";
+import { getSession } from "@/lib/nx/session";
+import { getAuthUser } from "@/lib/auth/jwt";
+import { isDemoMode } from "@/lib/env";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+// GET /api/connect/connections?doctorId=xxx OR ?patientId=xxx
+// Returns connections with lastMessage + unreadCount.
+//
+// Party boundary (production): listing a party's threads requires BEING that
+// party — the doctorId/patientId filters would otherwise let any signed-in
+// user enumerate arbitrary inboxes. Mirrors connectCallsListDenied's
+// callerId resolution (session?.userId ?? legacy?.id). DEMO_MODE keeps its
+// documented posture: the UI picks demo doctor/patient client-side.
+function listPartyDenied(req: NextRequest, filter: { doctorId?: string | null; patientId?: string | null }): NextResponse | null {
+  if (isDemoMode()) return null;
+  const session = getSession(req);
+  const legacy = getAuthUser(req);
+  const callerId = session?.userId ?? legacy?.id ?? null;
+  if (!callerId) return NextResponse.json({ error: "unauthenticated" }, { status: 401 });
+  if (filter.doctorId && callerId !== filter.doctorId) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  if (filter.patientId && callerId !== filter.patientId) {
+    return NextResponse.json({ error: "forbidden" }, { status: 403 });
+  }
+  return null;
+}
+
+export async function GET(req: NextRequest) {
+  const gate = connectGate(req);
+  if (gate) return gate;
+  try {
+    const { searchParams } = new URL(req.url);
+    const doctorId = searchParams.get("doctorId");
+    const patientId = searchParams.get("patientId");
+    if (!doctorId && !patientId) {
+      return NextResponse.json({ error: "no_filter" }, { status: 400 });
+    }
+    const party = listPartyDenied(req, { doctorId, patientId });
+    if (party) return party;
+
+    const where: any = { active: true };
+    if (doctorId) where.doctorId = doctorId;
+    if (patientId) where.patientId = patientId;
+
+    const connections = await db.connectConnection.findMany({
+      where,
+      orderBy: { updatedAt: "desc" },
+      take: 200,
+      include: {
+        messages: {
+          orderBy: { createdAt: "desc" },
+          take: 1,
+          select: { id: true, text: true, fromRole: true, fromName: true, createdAt: true, read: true },
+        },
+      },
+    });
+
+    // attach unreadCount (patient messages not yet read by doctor)
+    const withCounts = await Promise.all(
+      connections.map(async (c) => {
+        const unreadCount = await db.connectMessage.count({
+          where: { connectionId: c.id, fromRole: "patient", read: false },
+        });
+        const lastMessage = c.messages[0] || null;
+        return {
+          ...c,
+          lastMessage,
+          unreadCount,
+          messages: undefined, // strip nested
+        };
+      })
+    );
+
+    return NextResponse.json({ connections: withCounts });
+  } catch (err) {
+    log.error("connect", "connections_list_failed", { err: err instanceof Error ? err.message : String(err) });
+    return NextResponse.json({ error: "connect_list_failed", detail: "Connections could not be loaded. Please retry." }, { status: 500 });
+  }
+}
+
+// POST /api/connect/connections
+// Idempotent: if active connection exists for same doctorId+patientId, update lastConsultDate and return existing.
+// Sets whatsappSent=true. Returns {connection, whatsappSent, whatsappMessage}.
+export async function POST(req: NextRequest) {
+  const gate = connectGate(req);
+  if (gate) return gate;
+  // Write boundary (mirrors /api/connect/prescriptions/sync): creating or
+  // updating a thread is a doctor-side action — a patient/pharmacy/reception
+  // account can never open a follow-up channel. DEMO_MODE keeps its
+  // documented permissive posture via canActAsDoctor.
+  const denied = doctorOnly(req);
+  if (denied) return denied;
+  try {
+    const body = await req.json().catch(() => ({}));
+    const {
+      doctorId,
+      doctorName,
+      doctorSpecialty,
+      doctorPhone,
+      patientId,
+      patientName,
+      patientPhone,
+      patientAge,
+      patientGender,
+      source = "clinic",
+      sourceRefId,
+    } = body as any;
+
+    if (!doctorId || !patientId || !doctorName || !patientName) {
+      return NextResponse.json({ error: "missing_fields" }, { status: 400 });
+    }
+
+    // Look for existing active connection (idempotent)
+    const existing = await db.connectConnection.findFirst({
+      where: { doctorId, patientId, active: true },
+      orderBy: { updatedAt: "desc" },
+    });
+
+    let connection;
+    let whatsappSent = false;
+    let whatsappMessage: string | null = null;
+
+    if (existing) {
+      // Update lastConsultDate + refresh doctor/patient info
+      connection = await db.connectConnection.update({
+        where: { id: existing.id },
+        data: {
+          lastConsultDate: new Date(),
+          doctorName,
+          doctorSpecialty: doctorSpecialty ?? existing.doctorSpecialty,
+          doctorPhone: doctorPhone ?? existing.doctorPhone,
+          patientName,
+          patientPhone: patientPhone ?? existing.patientPhone,
+          patientAge: patientAge ?? existing.patientAge,
+          patientGender: patientGender ?? existing.patientGender,
+          sourceRefId: sourceRefId ?? existing.sourceRefId,
+        },
+      });
+
+      if (!existing.whatsappSent) {
+        whatsappSent = true;
+        whatsappMessage = buildWhatsAppMessage(connection);
+        await db.connectConnection.update({
+          where: { id: existing.id },
+          data: { whatsappSent: true, whatsappSentAt: new Date() },
+        });
+        connection = { ...connection, whatsappSent: true, whatsappSentAt: new Date() };
+      } else {
+        whatsappMessage = buildWhatsAppMessage(connection);
+      }
+    } else {
+      connection = await db.connectConnection.create({
+        data: {
+          doctorId,
+          doctorName,
+          doctorSpecialty: doctorSpecialty ?? null,
+          doctorPhone: doctorPhone ?? null,
+          patientId,
+          patientName,
+          patientPhone: patientPhone ?? null,
+          patientAge: patientAge ?? null,
+          patientGender: patientGender ?? null,
+          source,
+          sourceRefId: sourceRefId ?? null,
+          lastConsultDate: new Date(),
+          whatsappSent: true,
+          whatsappSentAt: new Date(),
+        },
+      });
+      whatsappSent = true;
+      whatsappMessage = buildWhatsAppMessage(connection);
+    }
+
+    return NextResponse.json({ connection, whatsappSent, whatsappMessage });
+  } catch (err) {
+    log.error("connect", "connection_create_failed", { err: err instanceof Error ? err.message : String(err) });
+    return NextResponse.json({ error: "connect_create_failed", detail: "The connection could not be created. Please retry." }, { status: 500 });
+  }
+}
+
+function buildWhatsAppMessage(c: {
+  doctorName: string;
+  patientName: string;
+  patientPhone: string | null;
+  doctorSpecialty: string | null;
+}): string {
+  const greeting = `Hello ${c.patientName}, this is Dr. ${c.doctorName.replace(/^Dr\.?\s*/i, "")}${c.doctorSpecialty ? ` (${c.doctorSpecialty})` : ""} from Nexura Connect.`;
+  const body = `Your follow-up channel is now open. You can chat, voice call, or video call me directly through the Nexura patient app. Reply here if you have any questions about your recent consultation or symptoms.`;
+  const cta = `Open: https://nexura.ai/connect/patient`;
+  return `${greeting}\n\n${body}\n\n${cta}`;
+}
