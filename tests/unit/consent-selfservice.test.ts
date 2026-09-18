@@ -110,17 +110,43 @@ describe("checkAiConsent against the real ledger", () => {
   let hospitalId = "";
   let patientId = "";
 
-  afterAll(async () => {
-    if (createdIds.length > 0) {
-      await db.nxConsent.deleteMany({ where: { id: { in: createdIds } } }).catch(() => {});
-    }
-  });
+afterAll(async () => {
+  if (createdIds.length > 0) {
+    await db.nxConsent
+      .deleteMany({ where: { id: { in: createdIds } } })
+      .catch(() => {});
+  }
+
+  if (patientId) {
+    await db.hospitalPatient
+      .delete({ where: { id: patientId } })
+      .catch(() => {});
+  }
+
+  if (hospitalId) {
+    await db.hospital
+      .delete({ where: { id: hospitalId } })
+      .catch(() => {});
+  }
+});
 
   it("resolves the latest ai_assist/data_share event — grant, withdraw, re-grant", async () => {
-    const hospital = await db.hospital.findFirst({ select: { id: true } });
-    const patient = await db.hospitalPatient.findFirst({ select: { id: true }, where: { hospitalId: hospital!.id } });
-    hospitalId = hospital!.id;
-    patientId = patient!.id;
+    const hospital = await db.hospital.create({
+  data: {
+    name: "CI Test Hospital",
+  },
+});
+
+const patient = await db.hospitalPatient.create({
+  data: {
+    hospitalId: hospital.id,
+    uhid: `TEST-SS-${Date.now()}`,
+    fullName: "CI Test Patient",
+  },
+});
+
+hospitalId = hospital.id;
+patientId = patient.id;
 
     const insert = (data: { type: string; status: string; grantedAt: Date; withdrawnAt?: Date | null }) =>
       db.nxConsent.create({ data: { hospitalId, patientId, patientUhid: "TEST-SS", recordedBy: "test", ...data } }).then((r) => {
@@ -139,7 +165,7 @@ describe("checkAiConsent against the real ledger", () => {
     expect(await checkAiConsent(hospitalId, patientId)).toBe(true);
 
     // withdraw (newest event) → must flip to false — the heart of self-service
-    const w = await insert({ type: "ai_assist", status: "withdrawn", grantedAt: new Date(Date.now() + 120_000), withdrawnAt: new Date(Date.now() + 120_000) });
+    await insert({ type: "ai_assist", status: "withdrawn", grantedAt: new Date(Date.now() + 120_000), withdrawnAt: new Date(Date.now() + 120_000) });
     expect(await checkAiConsent(hospitalId, patientId)).toBe(false);
 
     // re-grant via data_share (either type authorizes AI) → true again
